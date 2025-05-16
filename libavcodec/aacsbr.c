@@ -31,23 +31,37 @@
 #include "sbr.h"
 #include "aacsbr.h"
 #include "aacsbrdata.h"
-#include "aacsbr_tablegen.h"
-#include "fft.h"
 #include "aacps.h"
 #include "sbrdsp.h"
 #include "libavutil/internal.h"
+#include "libavutil/intfloat.h"
 #include "libavutil/libm.h"
 #include "libavutil/avassert.h"
+#include "libavutil/mem_internal.h"
 
 #include <stdint.h>
 #include <float.h>
 #include <math.h>
 
-#if ARCH_MIPS
-#include "mips/aacsbr_mips.h"
-#endif /* ARCH_MIPS */
+/**
+ * 2^(x) for integer x
+ * @return correctly rounded float
+ */
+static av_always_inline float exp2fi(int x) {
+    /* Normal range */
+    if (-126 <= x && x <= 128)
+        return av_int2float((x+127) << 23);
+    /* Too large */
+    else if (x > 128)
+        return INFINITY;
+    /* Subnormal numbers */
+    else if (x > -150)
+        return av_int2float(1 << (x+149));
+    /* Negligibly small */
+    else
+        return 0;
+}
 
-static VLC vlc_sbr[10];
 static void aacsbr_func_ptr_init(AACSBRContext *c);
 
 static void make_bands(int16_t* bands, int start, int stop, int num_bands)
@@ -73,15 +87,22 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
 {
     int k, e;
     int ch;
-
+    static const double exp2_tab[2] = {1, M_SQRT2};
     if (id_aac == TYPE_CPE && sbr->bs_coupling) {
-        float alpha      = sbr->data[0].bs_amp_res ?  1.0f :  0.5f;
-        float pan_offset = sbr->data[0].bs_amp_res ? 12.0f : 24.0f;
+        int pan_offset = sbr->data[0].bs_amp_res ? 12 : 24;
         for (e = 1; e <= sbr->data[0].bs_num_env; e++) {
             for (k = 0; k < sbr->n[sbr->data[0].bs_freq_res[e]]; k++) {
-                float temp1 = exp2f(sbr->data[0].env_facs[e][k] * alpha + 7.0f);
-                float temp2 = exp2f((pan_offset - sbr->data[1].env_facs[e][k]) * alpha);
-                float fac;
+                float temp1, temp2, fac;
+                if (sbr->data[0].bs_amp_res) {
+                    temp1 = exp2fi(sbr->data[0].env_facs_q[e][k] + 7);
+                    temp2 = exp2fi(pan_offset - sbr->data[1].env_facs_q[e][k]);
+                }
+                else {
+                    temp1 = exp2fi((sbr->data[0].env_facs_q[e][k]>>1) + 7) *
+                            exp2_tab[sbr->data[0].env_facs_q[e][k] & 1];
+                    temp2 = exp2fi((pan_offset - sbr->data[1].env_facs_q[e][k])>>1) *
+                            exp2_tab[(pan_offset - sbr->data[1].env_facs_q[e][k]) & 1];
+                }
                 if (temp1 > 1E20) {
                     av_log(NULL, AV_LOG_ERROR, "envelope scalefactor overflow in dequant\n");
                     temp1 = 1;
@@ -93,13 +114,10 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
         }
         for (e = 1; e <= sbr->data[0].bs_num_noise; e++) {
             for (k = 0; k < sbr->n_q; k++) {
-                float temp1 = exp2f(NOISE_FLOOR_OFFSET - sbr->data[0].noise_facs[e][k] + 1);
-                float temp2 = exp2f(12 - sbr->data[1].noise_facs[e][k]);
+                float temp1 = exp2fi(NOISE_FLOOR_OFFSET - sbr->data[0].noise_facs_q[e][k] + 1);
+                float temp2 = exp2fi(12 - sbr->data[1].noise_facs_q[e][k]);
                 float fac;
-                if (temp1 > 1E20) {
-                    av_log(NULL, AV_LOG_ERROR, "envelope scalefactor overflow in dequant\n");
-                    temp1 = 1;
-                }
+                av_assert0(temp1 <= 1E20);
                 fac = temp1 / (1.0f + temp2);
                 sbr->data[0].noise_facs[e][k] = fac;
                 sbr->data[1].noise_facs[e][k] = fac * temp2;
@@ -107,11 +125,13 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
         }
     } else { // SCE or one non-coupled CPE
         for (ch = 0; ch < (id_aac == TYPE_CPE) + 1; ch++) {
-            float alpha = sbr->data[ch].bs_amp_res ? 1.0f : 0.5f;
             for (e = 1; e <= sbr->data[ch].bs_num_env; e++)
                 for (k = 0; k < sbr->n[sbr->data[ch].bs_freq_res[e]]; k++){
-                    sbr->data[ch].env_facs[e][k] =
-                        exp2f(alpha * sbr->data[ch].env_facs[e][k] + 6.0f);
+                    if (sbr->data[ch].bs_amp_res)
+                        sbr->data[ch].env_facs[e][k] = exp2fi(sbr->data[ch].env_facs_q[e][k] + 6);
+                    else
+                        sbr->data[ch].env_facs[e][k] = exp2fi((sbr->data[ch].env_facs_q[e][k]>>1) + 6)
+                                                       * exp2_tab[sbr->data[ch].env_facs_q[e][k] & 1];
                     if (sbr->data[ch].env_facs[e][k] > 1E20) {
                         av_log(NULL, AV_LOG_ERROR, "envelope scalefactor overflow in dequant\n");
                         sbr->data[ch].env_facs[e][k] = 1;
@@ -121,7 +141,7 @@ static void sbr_dequant(SpectralBandReplication *sbr, int id_aac)
             for (e = 1; e <= sbr->data[ch].bs_num_noise; e++)
                 for (k = 0; k < sbr->n_q; k++)
                     sbr->data[ch].noise_facs[e][k] =
-                        exp2f(NOISE_FLOOR_OFFSET - sbr->data[ch].noise_facs[e][k]);
+                        exp2fi(NOISE_FLOOR_OFFSET - sbr->data[ch].noise_facs_q[e][k]);
         }
     }
 }
@@ -209,7 +229,7 @@ static void sbr_chirp(SpectralBandReplication *sbr, SBRData *ch_data)
  * Calculation of levels of additional HF signal components (14496-3 sp04 p219)
  * and Calculation of gain (14496-3 sp04 p219)
  */
-static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
+static void sbr_gain_calc(SpectralBandReplication *sbr,
                           SBRData *ch_data, const int e_a[2])
 {
     int e, k, m;
@@ -234,6 +254,7 @@ static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
                                             ((1.0f + sbr->e_curr[e][m]) *
                                              (1.0f + sbr->q_mapped[e][m])));
                 }
+                sbr->gain[e][m] += FLT_MIN;
             }
             for (m = sbr->f_tablelim[k] - sbr->kx[1]; m < sbr->f_tablelim[k + 1] - sbr->kx[1]; m++) {
                 sum[0] += sbr->e_origmapped[e][m];

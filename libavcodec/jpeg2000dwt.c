@@ -25,11 +25,10 @@
  * Discrete wavelet transform
  */
 
-#include "libavutil/avassert.h"
-#include "libavutil/common.h"
+#include "libavutil/error.h"
+#include "libavutil/macros.h"
 #include "libavutil/mem.h"
 #include "jpeg2000dwt.h"
-#include "internal.h"
 
 /* Defines for 9/7 DWT lifting parameters.
  * Parameters are in float. */
@@ -40,13 +39,12 @@
 
 /* Lifting parameters in integer format.
  * Computed as param = (float param) * (1 << 16) */
-#define I_LFTG_ALPHA  103949ll
-#define I_LFTG_BETA     3472ll
-#define I_LFTG_GAMMA   57862ll
-#define I_LFTG_DELTA   29066ll
-#define I_LFTG_K       80621ll
-#define I_LFTG_X       53274ll
-#define I_PRESHIFT 8
+#define I_LFTG_ALPHA_PRIME   38413ll // = 103949 - 65536, (= alpha - 1.0)
+#define I_LFTG_BETA           3472ll
+#define I_LFTG_GAMMA         57862ll
+#define I_LFTG_DELTA         29066ll
+#define I_LFTG_K             80621ll
+#define I_LFTG_X             53274ll
 
 static inline void extend53(int *p, int i0, int i1)
 {
@@ -82,7 +80,7 @@ static void sd_1d53(int *p, int i0, int i1)
 
     if (i1 <= i0 + 1) {
         if (i0 == 1)
-            p[1] <<= 1;
+            p[1] *= 2;
         return;
     }
 
@@ -235,8 +233,11 @@ static void sd_1d97_int(int *p, int i0, int i1)
     extend97_int(p, i0, i1);
     i0++; i1++;
 
-    for (i = (i0>>1) - 2; i < (i1>>1) + 1; i++)
-        p[2 * i + 1] -= (I_LFTG_ALPHA * (p[2 * i]     + p[2 * i + 2]) + (1 << 15)) >> 16;
+    for (i = (i0>>1) - 2; i < (i1>>1) + 1; i++) {
+        const int64_t sum = p[2 * i] + p[2 * i + 2];
+        p[2 * i + 1] -= sum;
+        p[2 * i + 1] -= (I_LFTG_ALPHA_PRIME * sum + (1 << 15)) >> 16;
+    }
     for (i = (i0>>1) - 1; i < (i1>>1) + 1; i++)
         p[2 * i]     -= (I_LFTG_BETA  * (p[2 * i - 1] + p[2 * i + 1]) + (1 << 15)) >> 16;
     for (i = (i0>>1) - 1; i < (i1>>1); i++)
@@ -255,7 +256,7 @@ static void dwt_encode97_int(DWTContext *s, int *t)
     line += 5;
 
     for (i = 0; i < w * h; i++)
-        t[i] <<= I_PRESHIFT;
+        t[i] *= 1 << I_PRESHIFT;
 
     for (lev = s->ndeclevels-1; lev >= 0; lev--){
         int lh = s->linelen[lev][0],
@@ -277,7 +278,7 @@ static void dwt_encode97_int(DWTContext *s, int *t)
 
             // copy back and deinterleave
             for (i =   mv; i < lv; i+=2, j++)
-                t[w*j + lp] = ((l[i] * I_LFTG_X) + (1 << 15)) >> 16;
+                t[w*j + lp] = l[i];
             for (i = 1-mv; i < lv; i+=2, j++)
                 t[w*j + lp] = l[i];
         }
@@ -294,7 +295,7 @@ static void dwt_encode97_int(DWTContext *s, int *t)
 
             // copy back and deinterleave
             for (i =   mh; i < lh; i+=2, j++)
-                t[w*lp + j] = ((l[i] * I_LFTG_X) + (1 << 15)) >> 16;
+                t[w*lp + j] = l[i];
             for (i = 1-mh; i < lh; i+=2, j++)
                 t[w*lp + j] = l[i];
         }
@@ -302,25 +303,25 @@ static void dwt_encode97_int(DWTContext *s, int *t)
     }
 
     for (i = 0; i < w * h; i++)
-        t[i] = (t[i] + ((1<<I_PRESHIFT)>>1)) >> I_PRESHIFT;
+        t[i] = (t[i] + ((1<<(I_PRESHIFT))>>1)) >> (I_PRESHIFT);
 }
 
-static void sr_1d53(int *p, int i0, int i1)
+static void sr_1d53(unsigned *p, int i0, int i1)
 {
     int i;
 
     if (i1 <= i0 + 1) {
         if (i0 == 1)
-            p[1] >>= 1;
+            p[1] = (int)p[1] >> 1;
         return;
     }
 
     extend53(p, i0, i1);
 
     for (i = (i0 >> 1); i < (i1 >> 1) + 1; i++)
-        p[2 * i] -= (p[2 * i - 1] + p[2 * i + 1] + 2) >> 2;
+        p[2 * i] -= (int)(p[2 * i - 1] + p[2 * i + 1] + 2) >> 2;
     for (i = (i0 >> 1); i < (i1 >> 1); i++)
-        p[2 * i + 1] += (p[2 * i] + p[2 * i + 2]) >> 1;
+        p[2 * i + 1] += (int)(p[2 * i] + p[2 * i + 2]) >> 1;
 }
 
 static void dwt_decode53(DWTContext *s, int *t)
@@ -464,16 +465,19 @@ static void sr_1d97_int(int32_t *p, int i0, int i1)
     extend97_int(p, i0, i1);
 
     for (i = (i0 >> 1) - 1; i < (i1 >> 1) + 2; i++)
-        p[2 * i]     -= (I_LFTG_DELTA * (p[2 * i - 1] + p[2 * i + 1]) + (1 << 15)) >> 16;
+        p[2 * i]     -= (I_LFTG_DELTA * (p[2 * i - 1] + (int64_t)p[2 * i + 1]) + (1 << 15)) >> 16;
     /* step 4 */
     for (i = (i0 >> 1) - 1; i < (i1 >> 1) + 1; i++)
-        p[2 * i + 1] -= (I_LFTG_GAMMA * (p[2 * i]     + p[2 * i + 2]) + (1 << 15)) >> 16;
+        p[2 * i + 1] -= (I_LFTG_GAMMA * (p[2 * i]     + (int64_t)p[2 * i + 2]) + (1 << 15)) >> 16;
     /*step 5*/
     for (i = (i0 >> 1); i < (i1 >> 1) + 1; i++)
-        p[2 * i]     += (I_LFTG_BETA  * (p[2 * i - 1] + p[2 * i + 1]) + (1 << 15)) >> 16;
+        p[2 * i]     += (I_LFTG_BETA  * (p[2 * i - 1] + (int64_t)p[2 * i + 1]) + (1 << 15)) >> 16;
     /* step 6 */
-    for (i = (i0 >> 1); i < (i1 >> 1); i++)
-        p[2 * i + 1] += (I_LFTG_ALPHA * (p[2 * i]     + p[2 * i + 2]) + (1 << 15)) >> 16;
+    for (i = (i0 >> 1); i < (i1 >> 1); i++) {
+        const int64_t sum = p[2 * i] + (int64_t) p[2 * i + 2];
+        p[2 * i + 1] += sum;
+        p[2 * i + 1] += (I_LFTG_ALPHA_PRIME * sum + (1 << 15)) >> 16;
+    }
 }
 
 static void dwt_decode97_int(DWTContext *s, int32_t *t)
@@ -487,9 +491,6 @@ static void dwt_decode97_int(DWTContext *s, int32_t *t)
     /* position at index O of line range [0-5,w+5] cf. extend function */
     line += 5;
 
-    for (i = 0; i < w * h; i++)
-        data[i] <<= I_PRESHIFT;
-
     for (lev = 0; lev < s->ndeclevels; lev++) {
         int lh = s->linelen[lev][0],
             lv = s->linelen[lev][1],
@@ -501,9 +502,9 @@ static void dwt_decode97_int(DWTContext *s, int32_t *t)
         l = line + mh;
         for (lp = 0; lp < lv; lp++) {
             int i, j = 0;
-            // rescale with interleaving
+            // interleaving
             for (i = mh; i < lh; i += 2, j++)
-                l[i] = ((data[w * lp + j] * I_LFTG_K) + (1 << 15)) >> 16;
+                l[i] = data[w * lp + j];
             for (i = 1 - mh; i < lh; i += 2, j++)
                 l[i] = data[w * lp + j];
 
@@ -517,9 +518,9 @@ static void dwt_decode97_int(DWTContext *s, int32_t *t)
         l = line + mv;
         for (lp = 0; lp < lh; lp++) {
             int i, j = 0;
-            // rescale with interleaving
+            // interleaving
             for (i = mv; i < lv; i += 2, j++)
-                l[i] = ((data[w * j + lp] * I_LFTG_K) + (1 << 15)) >> 16;
+                l[i] = data[w * j + lp];
             for (i = 1 - mv; i < lv; i += 2, j++)
                 l[i] = data[w * j + lp];
 
@@ -531,10 +532,11 @@ static void dwt_decode97_int(DWTContext *s, int32_t *t)
     }
 
     for (i = 0; i < w * h; i++)
-        data[i] = (data[i] + ((1<<I_PRESHIFT)>>1)) >> I_PRESHIFT;
+        // We shift down by `I_PRESHIFT` because the input coefficients `datap[]` were shifted up by `I_PRESHIFT` to secure the precision
+        data[i] = (int32_t)(data[i] + ((1LL<<(I_PRESHIFT))>>1)) >> (I_PRESHIFT);
 }
 
-int ff_jpeg2000_dwt_init(DWTContext *s, uint16_t border[2][2],
+int ff_jpeg2000_dwt_init(DWTContext *s, int border[2][2],
                          int decomp_levels, int type)
 {
     int i, j, lev = decomp_levels, maxlen,
@@ -580,6 +582,9 @@ int ff_jpeg2000_dwt_init(DWTContext *s, uint16_t border[2][2],
 
 int ff_dwt_encode(DWTContext *s, void *t)
 {
+    if (s->ndeclevels == 0)
+        return 0;
+
     switch(s->type){
         case FF_DWT97:
             dwt_encode97_float(s, t); break;
@@ -595,6 +600,9 @@ int ff_dwt_encode(DWTContext *s, void *t)
 
 int ff_dwt_decode(DWTContext *s, void *t)
 {
+    if (s->ndeclevels == 0)
+        return 0;
+
     switch (s->type) {
     case FF_DWT97:
         dwt_decode97_float(s, t);
@@ -616,125 +624,3 @@ void ff_dwt_destroy(DWTContext *s)
     av_freep(&s->f_linebuf);
     av_freep(&s->i_linebuf);
 }
-
-#ifdef TEST
-
-#include "libavutil/lfg.h"
-
-#define MAX_W 256
-
-static int test_dwt(int *array, int *ref, uint16_t border[2][2], int decomp_levels, int type, int max_diff) {
-    int ret, j;
-    DWTContext s1={{{0}}}, *s= &s1;
-    int64_t err2 = 0;
-
-    ret = ff_jpeg2000_dwt_init(s,  border, decomp_levels, type);
-    if (ret < 0) {
-        fprintf(stderr, "ff_jpeg2000_dwt_init failed\n");
-        return 1;
-    }
-    ret = ff_dwt_encode(s, array);
-    if (ret < 0) {
-        fprintf(stderr, "ff_dwt_encode failed\n");
-        return 1;
-    }
-    ret = ff_dwt_decode(s, array);
-    if (ret < 0) {
-        fprintf(stderr, "ff_dwt_encode failed\n");
-        return 1;
-    }
-    for (j = 0; j<MAX_W * MAX_W; j++) {
-        if (FFABS(array[j] - ref[j]) > max_diff) {
-            fprintf(stderr, "missmatch at %d (%d != %d) decomp:%d border %d %d %d %d\n",
-                    j, array[j], ref[j],decomp_levels, border[0][0], border[0][1], border[1][0], border[1][1]);
-            return 2;
-        }
-        err2 += (array[j] - ref[j]) * (array[j] - ref[j]);
-        array[j] = ref[j];
-    }
-    ff_dwt_destroy(s);
-
-    printf("%s, decomp:%2d border %3d %3d %3d %3d milli-err2:%9"PRId64"\n",
-           type == FF_DWT53 ? "5/3i" : "9/7i",
-           decomp_levels, border[0][0], border[0][1], border[1][0], border[1][1],
-           1000*err2 / ((border[0][1] - border[0][0])*(border[1][1] - border[1][0])));
-
-    return 0;
-}
-
-static int test_dwtf(float *array, float *ref, uint16_t border[2][2], int decomp_levels, float max_diff) {
-    int ret, j;
-    DWTContext s1={{{0}}}, *s= &s1;
-    double err2 = 0;
-
-    ret = ff_jpeg2000_dwt_init(s,  border, decomp_levels, FF_DWT97);
-    if (ret < 0) {
-        fprintf(stderr, "ff_jpeg2000_dwt_init failed\n");
-        return 1;
-    }
-    ret = ff_dwt_encode(s, array);
-    if (ret < 0) {
-        fprintf(stderr, "ff_dwt_encode failed\n");
-        return 1;
-    }
-    ret = ff_dwt_decode(s, array);
-    if (ret < 0) {
-        fprintf(stderr, "ff_dwt_encode failed\n");
-        return 1;
-    }
-    for (j = 0; j<MAX_W * MAX_W; j++) {
-        if (FFABS(array[j] - ref[j]) > max_diff) {
-            fprintf(stderr, "missmatch at %d (%f != %f) decomp:%d border %d %d %d %d\n",
-                    j, array[j], ref[j],decomp_levels, border[0][0], border[0][1], border[1][0], border[1][1]);
-            return 2;
-        }
-        err2 += (array[j] - ref[j]) * (array[j] - ref[j]);
-        array[j] = ref[j];
-    }
-    ff_dwt_destroy(s);
-
-    printf("9/7f, decomp:%2d border %3d %3d %3d %3d err2:%20.3f\n",
-           decomp_levels, border[0][0], border[0][1], border[1][0], border[1][1],
-           err2 / ((border[0][1] - border[0][0])*(border[1][1] - border[1][0])));
-
-    return 0;
-}
-
-static int array[MAX_W * MAX_W];
-static int ref  [MAX_W * MAX_W];
-static float arrayf[MAX_W * MAX_W];
-static float reff  [MAX_W * MAX_W];
-
-int main(void) {
-    AVLFG prng;
-    int i,j;
-    uint16_t border[2][2];
-    int ret, decomp_levels;
-
-    av_lfg_init(&prng, 1);
-
-    for (i = 0; i<MAX_W * MAX_W; i++)
-        arrayf[i] = reff[i] = array[i] = ref[i] =  av_lfg_get(&prng) % 2048;
-
-    for (i = 0; i < 100; i++) {
-        for (j=0; j<4; j++)
-            border[j>>1][j&1] = av_lfg_get(&prng) % MAX_W;
-        if (border[0][0] >= border[0][1] || border[1][0] >= border[1][1])
-            continue;
-        decomp_levels = av_lfg_get(&prng) % FF_DWT_MAX_DECLVLS;
-
-        ret = test_dwt(array, ref, border, decomp_levels, FF_DWT53, 0);
-        if (ret)
-            return ret;
-        ret = test_dwt(array, ref, border, decomp_levels, FF_DWT97_INT, FFMIN(7+5*decomp_levels, 15+3*decomp_levels));
-        if (ret)
-            return ret;
-        ret = test_dwtf(arrayf, reff, border, decomp_levels, 0.05);
-        if (ret)
-            return ret;
-    }
-
-    return 0;
-}
-
-#endif

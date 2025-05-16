@@ -50,7 +50,6 @@
 
 #include <stdint.h>
 #include "attributes.h"
-#include "common.h"
 #include "libavcodec/mathops.h"
 
 typedef struct AVFixedDSPContext {
@@ -150,7 +149,7 @@ typedef struct AVFixedDSPContext {
      * @param v2  second input vector, difference output, 16-byte aligned
      * @param len length of vectors, multiple of 4
      */
-    void (*butterflies_fixed)(int *av_restrict v1, int *av_restrict v2, int len);
+    void (*butterflies_fixed)(int *restrict v1, int *restrict v2, int len);
 } AVFixedDSPContext;
 
 /**
@@ -160,6 +159,9 @@ typedef struct AVFixedDSPContext {
  * @param strict  setting to non-zero avoids using functions which may not be IEEE-754 compliant
  */
 AVFixedDSPContext * avpriv_alloc_fixed_dsp(int strict);
+
+void ff_fixed_dsp_init_riscv(AVFixedDSPContext *fdsp);
+void ff_fixed_dsp_init_x86(AVFixedDSPContext *fdsp);
 
 /**
  * Calculate the square root

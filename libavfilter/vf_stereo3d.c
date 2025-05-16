@@ -27,8 +27,8 @@
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
 #include "drawutils.h"
+#include "filters.h"
 #include "formats.h"
-#include "internal.h"
 #include "video.h"
 #include "stereo3d.h"
 
@@ -100,9 +100,9 @@ static const int ana_coeff[][3][6] = {
      {    0,     0,     0,     0, 65536,     0},
      {    0,     0,     0,     0,     0, 65536}},
   [ANAGLYPH_RC_DUBOIS] =
-    {{29891, 32800, 11559, -2849, -5763,  -102},
-     {-2627, -2479, -1033, 24804, 48080, -1209},
-     { -997, -1350,  -358, -4729, -7403, 80373}},
+    {{29884, 32768, 11534, -2818, -5767,  -131},
+     {-2621, -2490, -1049, 24773, 48103, -1180},
+     { -983, -1376,  -328, -4719, -7406, 80347}},
   [ANAGLYPH_GM_GRAY]   =
     {{    0,     0,     0, 19595, 38470,  7471},
      {19595, 38470,  7471,     0,     0,     0},
@@ -132,9 +132,9 @@ static const int ana_coeff[][3][6] = {
      {    0,     0,     0,     0, 65536,     0},
      {    0,     0, 65536,     0,     0,     0}},
   [ANAGLYPH_YB_DUBOIS] =
-    {{65535,-12650,18451,   -987, -7590, -1049},
-     {-1604, 56032, 4196,    370,  3826, -1049},
-     {-2345,-10676, 1358,   5801, 11416, 56217}},
+    {{69599,-13435,19595,  -1048, -8061, -1114},
+     {-1704, 59507, 4456,    393,  4063, -1114},
+     {-2490,-11338, 1442,   6160, 12124, 59703}},
 };
 
 typedef struct Stereo3DContext {
@@ -148,9 +148,9 @@ typedef struct Stereo3DContext {
     int hsub, vsub;
     int pixstep[4];
     AVFrame *prev;
-    double ts_unit;
     int blanks;
     int in_off_left[4], in_off_right[4];
+    AVRational aspect;
     Stereo3DDSPContext dsp;
 } Stereo3DContext;
 
@@ -158,53 +158,63 @@ typedef struct Stereo3DContext {
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption stereo3d_options[] = {
-    { "in",    "set input format",  OFFSET(in.format),   AV_OPT_TYPE_INT,   {.i64=SIDE_BY_SIDE_LR}, INTERLEAVE_ROWS_LR, STEREO_CODE_COUNT-1, FLAGS, "in"},
-    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "in" },
-    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "in" },
-    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "in" },
-    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "in" },
-    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, "in" },
-    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, "in" },
-    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, "in" },
-    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, "in" },
-    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, "in" },
-    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, "in" },
-    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, "in" },
-    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, "in" },
-    { "out",   "set output format", OFFSET(out.format),  AV_OPT_TYPE_INT,   {.i64=ANAGLYPH_RC_DUBOIS}, 0, STEREO_CODE_COUNT-1, FLAGS, "out"},
-    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "out" },
-    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "out" },
-    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "out" },
-    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "out" },
-    { "agmc",  "anaglyph green magenta color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_COLOR},  0, 0, FLAGS, "out" },
-    { "agmd",  "anaglyph green magenta dubois",       0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "agmg",  "anaglyph green magenta gray",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_GRAY},   0, 0, FLAGS, "out" },
-    { "agmh",  "anaglyph green magenta half color",   0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_HALF},   0, 0, FLAGS, "out" },
-    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, "out" },
-    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, "out" },
-    { "arbg",  "anaglyph red blue gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RB_GRAY},   0, 0, FLAGS, "out" },
-    { "arcc",  "anaglyph red cyan color",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_COLOR},  0, 0, FLAGS, "out" },
-    { "arcd",  "anaglyph red cyan dubois",            0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "arcg",  "anaglyph red cyan gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_GRAY},   0, 0, FLAGS, "out" },
-    { "arch",  "anaglyph red cyan half color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_HALF},   0, 0, FLAGS, "out" },
-    { "argg",  "anaglyph red green gray",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RG_GRAY},   0, 0, FLAGS, "out" },
-    { "aybc",  "anaglyph yellow blue color",          0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_COLOR},  0, 0, FLAGS, "out" },
-    { "aybd",  "anaglyph yellow blue dubois",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "aybg",  "anaglyph yellow blue gray",           0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_GRAY},   0, 0, FLAGS, "out" },
-    { "aybh",  "anaglyph yellow blue half color",     0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_HALF},   0, 0, FLAGS, "out" },
-    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, "out" },
-    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, "out" },
-    { "ml",    "mono left",                           0, AV_OPT_TYPE_CONST, {.i64=MONO_L},             0, 0, FLAGS, "out" },
-    { "mr",    "mono right",                          0, AV_OPT_TYPE_CONST, {.i64=MONO_R},             0, 0, FLAGS, "out" },
-    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, "out" },
-    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, "out" },
-    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, "out" },
-    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, "out" },
-    { "chl",   "checkerboard left first",             0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_LR},    0, 0, FLAGS, "out" },
-    { "chr",   "checkerboard right first",            0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_RL},    0, 0, FLAGS, "out" },
-    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, "out" },
-    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, "out" },
-    { "hdmi",  "HDMI frame pack",                     0, AV_OPT_TYPE_CONST, {.i64=HDMI},               0, 0, FLAGS, "out" },
+    { "in",    "set input format",  OFFSET(in.format),   AV_OPT_TYPE_INT,   {.i64=SIDE_BY_SIDE_LR}, INTERLEAVE_ROWS_LR, STEREO_CODE_COUNT-1, FLAGS, .unit = "in"},
+    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "in" },
+    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "in" },
+    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "in" },
+    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "in" },
+    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "in" },
+    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "in" },
+    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "in" },
+    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "in" },
+    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, .unit = "in" },
+    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, .unit = "in" },
+    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, .unit = "in" },
+    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, .unit = "in" },
+    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, .unit = "in" },
+    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, .unit = "in" },
+    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, .unit = "in" },
+    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, .unit = "in" },
+    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, .unit = "in" },
+    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, .unit = "in" },
+    { "out",   "set output format", OFFSET(out.format),  AV_OPT_TYPE_INT,   {.i64=ANAGLYPH_RC_DUBOIS}, 0, STEREO_CODE_COUNT-1, FLAGS, .unit = "out"},
+    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "out" },
+    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "out" },
+    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "out" },
+    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "out" },
+    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "out" },
+    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "out" },
+    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "out" },
+    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "out" },
+    { "agmc",  "anaglyph green magenta color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "agmd",  "anaglyph green magenta dubois",       0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "agmg",  "anaglyph green magenta gray",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "agmh",  "anaglyph green magenta half color",   0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, .unit = "out" },
+    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, .unit = "out" },
+    { "arbg",  "anaglyph red blue gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RB_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "arcc",  "anaglyph red cyan color",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "arcd",  "anaglyph red cyan dubois",            0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "arcg",  "anaglyph red cyan gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "arch",  "anaglyph red cyan half color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "argg",  "anaglyph red green gray",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RG_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "aybc",  "anaglyph yellow blue color",          0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "aybd",  "anaglyph yellow blue dubois",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "aybg",  "anaglyph yellow blue gray",           0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "aybh",  "anaglyph yellow blue half color",     0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, .unit = "out" },
+    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, .unit = "out" },
+    { "ml",    "mono left",                           0, AV_OPT_TYPE_CONST, {.i64=MONO_L},             0, 0, FLAGS, .unit = "out" },
+    { "mr",    "mono right",                          0, AV_OPT_TYPE_CONST, {.i64=MONO_R},             0, 0, FLAGS, .unit = "out" },
+    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, .unit = "out" },
+    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, .unit = "out" },
+    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, .unit = "out" },
+    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, .unit = "out" },
+    { "chl",   "checkerboard left first",             0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_LR},    0, 0, FLAGS, .unit = "out" },
+    { "chr",   "checkerboard right first",            0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_RL},    0, 0, FLAGS, .unit = "out" },
+    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, .unit = "out" },
+    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, .unit = "out" },
+    { "hdmi",  "HDMI frame pack",                     0, AV_OPT_TYPE_CONST, {.i64=HDMI},               0, 0, FLAGS, .unit = "out" },
     { NULL }
 };
 
@@ -269,11 +279,12 @@ static const enum AVPixelFormat other_pix_fmts[] = {
     AV_PIX_FMT_NONE
 };
 
-static int query_formats(AVFilterContext *ctx)
+static int query_formats(const AVFilterContext *ctx,
+                         AVFilterFormatsConfig **cfg_in,
+                         AVFilterFormatsConfig **cfg_out)
 {
-    Stereo3DContext *s = ctx->priv;
+    const Stereo3DContext *s = ctx->priv;
     const enum AVPixelFormat *pix_fmts;
-    AVFilterFormats *fmts_list;
 
     switch (s->out.format) {
     case ANAGLYPH_GM_COLOR:
@@ -296,10 +307,7 @@ static int query_formats(AVFilterContext *ctx)
         pix_fmts = other_pix_fmts;
     }
 
-    fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
+    return ff_set_common_formats_from_list2(ctx, cfg_in, cfg_out, pix_fmts);
 }
 
 static inline uint8_t ana_convert(const int *coeff, const uint8_t *left, const uint8_t *right)
@@ -311,6 +319,26 @@ static inline uint8_t ana_convert(const int *coeff, const uint8_t *left, const u
     sum += coeff[2] * left[2] + coeff[5] * right[2]; //blue in
 
     return av_clip_uint8(sum >> 16);
+}
+
+static void anaglyph_ic(uint8_t *dst, uint8_t *lsrc, uint8_t *rsrc,
+                        ptrdiff_t dst_linesize, ptrdiff_t l_linesize, ptrdiff_t r_linesize,
+                        int width, int height,
+                        const int *ana_matrix_r, const int *ana_matrix_g, const int *ana_matrix_b)
+{
+    int x, y, o;
+
+    for (y = 0; y < height; y++) {
+        for (o = 0, x = 0; x < width; x++, o+= 3) {
+            dst[o    ] = ana_convert(ana_matrix_r, lsrc + o * 2, rsrc + o * 2);
+            dst[o + 1] = ana_convert(ana_matrix_g, lsrc + o * 2, rsrc + o * 2);
+            dst[o + 2] = ana_convert(ana_matrix_b, lsrc + o * 2, rsrc + o * 2);
+        }
+
+        dst  += dst_linesize;
+        lsrc += l_linesize;
+        rsrc += r_linesize;
+    }
 }
 
 static void anaglyph(uint8_t *dst, uint8_t *lsrc, uint8_t *rsrc,
@@ -338,13 +366,17 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *inlink = ctx->inputs[0];
     Stereo3DContext *s = ctx->priv;
-    AVRational aspect = inlink->sample_aspect_ratio;
-    AVRational fps = inlink->frame_rate;
+    FilterLink *il = ff_filter_link(inlink);
+    FilterLink *ol = ff_filter_link(outlink);
+    AVRational fps = il->frame_rate;
     AVRational tb = inlink->time_base;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(outlink->format);
     int ret;
+    s->aspect = inlink->sample_aspect_ratio;
 
     switch (s->in.format) {
+    case INTERLEAVE_COLS_LR:
+    case INTERLEAVE_COLS_RL:
     case SIDE_BY_SIDE_2_LR:
     case SIDE_BY_SIDE_LR:
     case SIDE_BY_SIDE_2_RL:
@@ -381,25 +413,25 @@ static int config_output(AVFilterLink *outlink)
 
     switch (s->in.format) {
     case SIDE_BY_SIDE_2_LR:
-        aspect.num     *= 2;
+        s->aspect.num  *= 2;
     case SIDE_BY_SIDE_LR:
         s->width        = inlink->w / 2;
         s->in.off_right = s->width;
         break;
     case SIDE_BY_SIDE_2_RL:
-        aspect.num     *= 2;
+        s->aspect.num  *= 2;
     case SIDE_BY_SIDE_RL:
         s->width        = inlink->w / 2;
         s->in.off_left  = s->width;
         break;
     case ABOVE_BELOW_2_LR:
-        aspect.den     *= 2;
+        s->aspect.den  *= 2;
     case ABOVE_BELOW_LR:
         s->in.row_right =
         s->height       = inlink->h / 2;
         break;
     case ABOVE_BELOW_2_RL:
-        aspect.den     *= 2;
+        s->aspect.den  *= 2;
     case ABOVE_BELOW_RL:
         s->in.row_left  =
         s->height       = inlink->h / 2;
@@ -408,6 +440,10 @@ static int config_output(AVFilterLink *outlink)
     case ALTERNATING_LR:
         fps.den        *= 2;
         tb.num         *= 2;
+        break;
+    case INTERLEAVE_COLS_RL:
+    case INTERLEAVE_COLS_LR:
+        s->width        = inlink->w / 2;
         break;
     case INTERLEAVE_ROWS_LR:
     case INTERLEAVE_ROWS_RL:
@@ -459,19 +495,19 @@ static int config_output(AVFilterLink *outlink)
         break;
     }
     case SIDE_BY_SIDE_2_LR:
-        aspect.den      *= 2;
+        s->aspect.den   *= 2;
     case SIDE_BY_SIDE_LR:
         s->out.width     = s->width * 2;
         s->out.off_right = s->width;
         break;
     case SIDE_BY_SIDE_2_RL:
-        aspect.den      *= 2;
+        s->aspect.den   *= 2;
     case SIDE_BY_SIDE_RL:
         s->out.width     = s->width * 2;
         s->out.off_left  = s->width;
         break;
     case ABOVE_BELOW_2_LR:
-        aspect.num      *= 2;
+        s->aspect.num   *= 2;
     case ABOVE_BELOW_LR:
         s->out.height    = s->height * 2;
         s->out.row_right = s->height;
@@ -487,7 +523,7 @@ static int config_output(AVFilterLink *outlink)
         s->out.row_right = s->height + s->blanks;
         break;
     case ABOVE_BELOW_2_RL:
-        aspect.num      *= 2;
+        s->aspect.num   *= 2;
     case ABOVE_BELOW_RL:
         s->out.height    = s->height * 2;
         s->out.row_left  = s->height;
@@ -497,18 +533,18 @@ static int config_output(AVFilterLink *outlink)
         s->out.row_step  = 2;
         s->out.height    = s->height * 2;
         s->out.off_rstep = 1;
-        s->in.off_rstep  = s->in.format != INTERLEAVE_ROWS_RL;
         break;
     case INTERLEAVE_ROWS_RL:
         s->in.row_step   = 1 + (s->in.format == INTERLEAVE_ROWS_LR);
         s->out.row_step  = 2;
         s->out.height    = s->height * 2;
         s->out.off_lstep = 1;
-        s->in.off_lstep  = s->in.format != INTERLEAVE_ROWS_LR;
         break;
     case MONO_R:
-        s->in.off_left   = s->in.off_right;
-        s->in.row_left   = s->in.row_right;
+        if (s->in.format != INTERLEAVE_COLS_LR) {
+            s->in.off_left = s->in.off_right;
+            s->in.row_left = s->in.row_right;
+        }
         if (s->in.format == INTERLEAVE_ROWS_LR)
             FFSWAP(int, s->in.off_lstep, s->in.off_rstep);
         break;
@@ -523,8 +559,6 @@ static int config_output(AVFilterLink *outlink)
         break;
     case CHECKERBOARD_LR:
     case CHECKERBOARD_RL:
-        s->out.width     = s->width * 2;
-        break;
     case INTERLEAVE_COLS_LR:
     case INTERLEAVE_COLS_RL:
         s->out.width     = s->width * 2;
@@ -534,25 +568,36 @@ static int config_output(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
 
+    if (s->in.format == INTERLEAVE_COLS_LR || s->in.format == INTERLEAVE_COLS_RL) {
+        if ((s->in.format & 1) != (s->out.format & 1)) {
+            FFSWAP(int, s->in.row_left,   s->in.row_right);
+            FFSWAP(int, s->in.off_lstep,  s->in.off_rstep);
+            FFSWAP(int, s->in.off_left,   s->in.off_right);
+            FFSWAP(int, s->out.row_left,  s->out.row_right);
+            FFSWAP(int, s->out.off_lstep, s->out.off_rstep);
+            FFSWAP(int, s->out.off_left,  s->out.off_right);
+        }
+    }
+
     outlink->w = s->out.width;
     outlink->h = s->out.height;
-    outlink->frame_rate = fps;
+    ol->frame_rate = fps;
     outlink->time_base = tb;
-    outlink->sample_aspect_ratio = aspect;
+    outlink->sample_aspect_ratio = s->aspect;
 
     if ((ret = av_image_fill_linesizes(s->linesize, outlink->format, s->width)) < 0)
         return ret;
     s->nb_planes = av_pix_fmt_count_planes(outlink->format);
     av_image_fill_max_pixsteps(s->pixstep, NULL, desc);
-    s->ts_unit = av_q2d(av_inv_q(av_mul_q(outlink->frame_rate, outlink->time_base)));
-    s->pheight[1] = s->pheight[2] = FF_CEIL_RSHIFT(s->height, desc->log2_chroma_h);
+    s->pheight[1] = s->pheight[2] = AV_CEIL_RSHIFT(s->height, desc->log2_chroma_h);
     s->pheight[0] = s->pheight[3] = s->height;
     s->hsub = desc->log2_chroma_w;
     s->vsub = desc->log2_chroma_h;
 
     s->dsp.anaglyph = anaglyph;
-    if (ARCH_X86)
-        ff_stereo3d_init_x86(&s->dsp);
+#if ARCH_X86
+    ff_stereo3d_init_x86(&s->dsp);
+#endif
 
     return 0;
 }
@@ -586,17 +631,64 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
     return 0;
 }
 
+static void interleave_cols_to_any(Stereo3DContext *s, int *out_off, int p, AVFrame *in, AVFrame *out, int d)
+{
+    int y, x;
+
+    for (y = 0; y < s->pheight[p]; y++) {
+        const uint8_t *src = (const uint8_t*)in->data[p] + y * in->linesize[p] + d * s->pixstep[p];
+        uint8_t *dst = out->data[p] + out_off[p] + y * out->linesize[p] * s->out.row_step;
+
+        switch (s->pixstep[p]) {
+        case 1:
+            for (x = 0; x < s->linesize[p]; x++)
+                dst[x] = src[x * 2];
+            break;
+        case 2:
+            for (x = 0; x < s->linesize[p]; x+=2)
+                AV_WN16(&dst[x], AV_RN16(&src[x * 2]));
+            break;
+        case 3:
+            for (x = 0; x < s->linesize[p]; x+=3)
+                AV_WB24(&dst[x], AV_RB24(&src[x * 2]));
+            break;
+        case 4:
+            for (x = 0; x < s->linesize[p]; x+=4)
+                AV_WN32(&dst[x], AV_RN32(&src[x * 2]));
+            break;
+        case 6:
+            for (x = 0; x < s->linesize[p]; x+=6)
+                AV_WB48(&dst[x], AV_RB48(&src[x * 2]));
+            break;
+        case 8:
+            for (x = 0; x < s->linesize[p]; x+=8)
+                AV_WN64(&dst[x], AV_RN64(&src[x * 2]));
+            break;
+        }
+    }
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 {
     AVFilterContext *ctx  = inlink->dst;
     Stereo3DContext *s = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
-    AVFrame *out, *oleft, *oright, *ileft, *iright;
+    AVFrame *out = NULL, *oleft, *oright, *ileft, *iright;
     int out_off_left[4], out_off_right[4];
-    int i;
+    int i, ret;
 
     if (s->in.format == s->out.format)
         return ff_filter_frame(outlink, inpicref);
+
+    switch (s->out.format) {
+    case ALTERNATING_LR:
+    case ALTERNATING_RL:
+        if (!s->prev) {
+            s->prev = inpicref;
+            return 0;
+        }
+        break;
+    };
 
     switch (s->in.format) {
     case ALTERNATING_LR:
@@ -614,36 +706,128 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
         ileft = iright = inpicref;
     };
 
-    out = oleft = oright = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    if (!out) {
-        av_frame_free(&s->prev);
-        av_frame_free(&inpicref);
-        return AVERROR(ENOMEM);
-    }
-    av_frame_copy_props(out, inpicref);
-
-    if (s->out.format == ALTERNATING_LR ||
-        s->out.format == ALTERNATING_RL) {
-        oright = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-        if (!oright) {
+    if ((s->out.format == ALTERNATING_LR ||
+         s->out.format == ALTERNATING_RL) &&
+        (s->in.format == SIDE_BY_SIDE_LR ||
+         s->in.format == SIDE_BY_SIDE_RL ||
+         s->in.format == SIDE_BY_SIDE_2_LR ||
+         s->in.format == SIDE_BY_SIDE_2_RL ||
+         s->in.format == ABOVE_BELOW_LR ||
+         s->in.format == ABOVE_BELOW_RL ||
+         s->in.format == ABOVE_BELOW_2_LR ||
+         s->in.format == ABOVE_BELOW_2_RL ||
+         s->in.format == INTERLEAVE_ROWS_LR ||
+         s->in.format == INTERLEAVE_ROWS_RL)) {
+        oright = av_frame_clone(s->prev);
+        oleft  = av_frame_clone(s->prev);
+        if (!oright || !oleft) {
+            av_frame_free(&oright);
             av_frame_free(&oleft);
             av_frame_free(&s->prev);
             av_frame_free(&inpicref);
             return AVERROR(ENOMEM);
         }
-        av_frame_copy_props(oright, inpicref);
+    } else if ((s->out.format == MONO_L ||
+                s->out.format == MONO_R) &&
+        (s->in.format == SIDE_BY_SIDE_LR ||
+         s->in.format == SIDE_BY_SIDE_RL ||
+         s->in.format == SIDE_BY_SIDE_2_LR ||
+         s->in.format == SIDE_BY_SIDE_2_RL ||
+         s->in.format == ABOVE_BELOW_LR ||
+         s->in.format == ABOVE_BELOW_RL ||
+         s->in.format == ABOVE_BELOW_2_LR ||
+         s->in.format == ABOVE_BELOW_2_RL ||
+         s->in.format == INTERLEAVE_ROWS_LR ||
+         s->in.format == INTERLEAVE_ROWS_RL)) {
+        out = oleft = oright = av_frame_clone(inpicref);
+        if (!out) {
+            av_frame_free(&s->prev);
+            av_frame_free(&inpicref);
+            return AVERROR(ENOMEM);
+        }
+    } else if ((s->out.format == MONO_L && s->in.format == ALTERNATING_LR) ||
+               (s->out.format == MONO_R && s->in.format == ALTERNATING_RL)) {
+        s->prev->pts /= 2;
+        ret = ff_filter_frame(outlink, s->prev);
+        av_frame_free(&inpicref);
+        s->prev = NULL;
+        return ret;
+    } else if ((s->out.format == MONO_L && s->in.format == ALTERNATING_RL) ||
+               (s->out.format == MONO_R && s->in.format == ALTERNATING_LR)) {
+        av_frame_free(&s->prev);
+        inpicref->pts /= 2;
+        return ff_filter_frame(outlink, inpicref);
+    } else if ((s->out.format == ALTERNATING_LR && s->in.format == ALTERNATING_RL) ||
+               (s->out.format == ALTERNATING_RL && s->in.format == ALTERNATING_LR)) {
+        FFSWAP(int64_t, s->prev->pts, inpicref->pts);
+        ff_filter_frame(outlink, inpicref);
+        ret = ff_filter_frame(outlink, s->prev);
+        s->prev = NULL;
+        return ret;
+    } else {
+        out = oleft = oright = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+        if (!out) {
+            av_frame_free(&s->prev);
+            av_frame_free(&inpicref);
+            return AVERROR(ENOMEM);
+        }
+        av_frame_copy_props(out, inpicref);
+
+        if (s->out.format == ALTERNATING_LR ||
+            s->out.format == ALTERNATING_RL) {
+            oright = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+            if (!oright) {
+                av_frame_free(&oleft);
+                av_frame_free(&s->prev);
+                av_frame_free(&inpicref);
+                return AVERROR(ENOMEM);
+            }
+            av_frame_copy_props(oright, s->prev);
+        }
     }
 
     for (i = 0; i < 4; i++) {
         int hsub = i == 1 || i == 2 ? s->hsub : 0;
         int vsub = i == 1 || i == 2 ? s->vsub : 0;
-        s->in_off_left[i]   = (FF_CEIL_RSHIFT(s->in.row_left,   vsub) + s->in.off_lstep)  * ileft->linesize[i]  + FF_CEIL_RSHIFT(s->in.off_left   * s->pixstep[i], hsub);
-        s->in_off_right[i]  = (FF_CEIL_RSHIFT(s->in.row_right,  vsub) + s->in.off_rstep)  * iright->linesize[i] + FF_CEIL_RSHIFT(s->in.off_right  * s->pixstep[i], hsub);
-        out_off_left[i]  = (FF_CEIL_RSHIFT(s->out.row_left,  vsub) + s->out.off_lstep) * oleft->linesize[i]  + FF_CEIL_RSHIFT(s->out.off_left  * s->pixstep[i], hsub);
-        out_off_right[i] = (FF_CEIL_RSHIFT(s->out.row_right, vsub) + s->out.off_rstep) * oright->linesize[i] + FF_CEIL_RSHIFT(s->out.off_right * s->pixstep[i], hsub);
+        s->in_off_left[i]   = (AV_CEIL_RSHIFT(s->in.row_left,   vsub) + s->in.off_lstep)  * ileft->linesize[i]  + AV_CEIL_RSHIFT(s->in.off_left   * s->pixstep[i], hsub);
+        s->in_off_right[i]  = (AV_CEIL_RSHIFT(s->in.row_right,  vsub) + s->in.off_rstep)  * iright->linesize[i] + AV_CEIL_RSHIFT(s->in.off_right  * s->pixstep[i], hsub);
+        out_off_left[i]  = (AV_CEIL_RSHIFT(s->out.row_left,  vsub) + s->out.off_lstep) * oleft->linesize[i]  + AV_CEIL_RSHIFT(s->out.off_left  * s->pixstep[i], hsub);
+        out_off_right[i] = (AV_CEIL_RSHIFT(s->out.row_right, vsub) + s->out.off_rstep) * oright->linesize[i] + AV_CEIL_RSHIFT(s->out.off_right * s->pixstep[i], hsub);
     }
 
     switch (s->out.format) {
+    case ALTERNATING_LR:
+    case ALTERNATING_RL:
+        switch (s->in.format) {
+        case INTERLEAVE_ROWS_LR:
+        case INTERLEAVE_ROWS_RL:
+            for (i = 0; i < s->nb_planes; i++) {
+                oleft->linesize[i]  *= 2;
+                oright->linesize[i] *= 2;
+            }
+        case ABOVE_BELOW_LR:
+        case ABOVE_BELOW_RL:
+        case ABOVE_BELOW_2_LR:
+        case ABOVE_BELOW_2_RL:
+        case SIDE_BY_SIDE_LR:
+        case SIDE_BY_SIDE_RL:
+        case SIDE_BY_SIDE_2_LR:
+        case SIDE_BY_SIDE_2_RL:
+            oleft->width   = outlink->w;
+            oright->width  = outlink->w;
+            oleft->height  = outlink->h;
+            oright->height = outlink->h;
+
+            for (i = 0; i < s->nb_planes; i++) {
+                oleft->data[i]  += s->in_off_left[i];
+                oright->data[i] += s->in_off_right[i];
+            }
+            break;
+        default:
+            goto copy;
+            break;
+        }
+        break;
     case HDMI:
         for (i = 0; i < s->nb_planes; i++) {
             int j, h = s->height >> ((i == 1 || i == 2) ? s->vsub : 0);
@@ -652,8 +836,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
             for (j = h; j < h + b; j++)
                 memset(oleft->data[i] + j * s->linesize[i], 0, s->linesize[i]);
         }
-    case ALTERNATING_LR:
-    case ALTERNATING_RL:
     case SIDE_BY_SIDE_LR:
     case SIDE_BY_SIDE_RL:
     case SIDE_BY_SIDE_2_LR:
@@ -664,27 +846,70 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
     case ABOVE_BELOW_2_RL:
     case INTERLEAVE_ROWS_LR:
     case INTERLEAVE_ROWS_RL:
-        for (i = 0; i < s->nb_planes; i++) {
-            av_image_copy_plane(oleft->data[i] + out_off_left[i],
-                                oleft->linesize[i] * s->out.row_step,
-                                ileft->data[i] + s->in_off_left[i],
-                                ileft->linesize[i] * s->in.row_step,
-                                s->linesize[i], s->pheight[i]);
-            av_image_copy_plane(oright->data[i] + out_off_right[i],
-                                oright->linesize[i] * s->out.row_step,
-                                iright->data[i] + s->in_off_right[i],
-                                iright->linesize[i] * s->in.row_step,
-                                s->linesize[i], s->pheight[i]);
+copy:
+        if (s->in.format == INTERLEAVE_COLS_LR ||
+            s->in.format == INTERLEAVE_COLS_RL) {
+            for (i = 0; i < s->nb_planes; i++) {
+                int d = (s->in.format & 1) != (s->out.format & 1);
+
+                interleave_cols_to_any(s, out_off_left,  i, ileft,  oleft,   d);
+                interleave_cols_to_any(s, out_off_right, i, iright, oright, !d);
+            }
+        } else {
+            for (i = 0; i < s->nb_planes; i++) {
+                av_image_copy_plane(oleft->data[i] + out_off_left[i],
+                                    oleft->linesize[i] * s->out.row_step,
+                                    ileft->data[i] + s->in_off_left[i],
+                                    ileft->linesize[i] * s->in.row_step,
+                                    s->linesize[i], s->pheight[i]);
+                av_image_copy_plane(oright->data[i] + out_off_right[i],
+                                    oright->linesize[i] * s->out.row_step,
+                                    iright->data[i] + s->in_off_right[i],
+                                    iright->linesize[i] * s->in.row_step,
+                                    s->linesize[i], s->pheight[i]);
+            }
         }
         break;
     case MONO_L:
         iright = ileft;
     case MONO_R:
-        for (i = 0; i < s->nb_planes; i++) {
-            av_image_copy_plane(out->data[i], out->linesize[i],
-                                iright->data[i] + s->in_off_left[i],
-                                iright->linesize[i] * s->in.row_step,
-                                s->linesize[i], s->pheight[i]);
+        switch (s->in.format) {
+        case INTERLEAVE_ROWS_LR:
+        case INTERLEAVE_ROWS_RL:
+            for (i = 0; i < s->nb_planes; i++) {
+                out->linesize[i] *= 2;
+            }
+        case ABOVE_BELOW_LR:
+        case ABOVE_BELOW_RL:
+        case ABOVE_BELOW_2_LR:
+        case ABOVE_BELOW_2_RL:
+        case SIDE_BY_SIDE_LR:
+        case SIDE_BY_SIDE_RL:
+        case SIDE_BY_SIDE_2_LR:
+        case SIDE_BY_SIDE_2_RL:
+            out->width  = outlink->w;
+            out->height = outlink->h;
+
+            for (i = 0; i < s->nb_planes; i++) {
+                out->data[i] += s->in_off_left[i];
+            }
+            break;
+        case INTERLEAVE_COLS_LR:
+        case INTERLEAVE_COLS_RL:
+            for (i = 0; i < s->nb_planes; i++) {
+                const int d = (s->in.format & 1) != (s->out.format & 1);
+
+                interleave_cols_to_any(s, out_off_right, i, iright, out, d);
+            }
+            break;
+        default:
+            for (i = 0; i < s->nb_planes; i++) {
+                av_image_copy_plane(out->data[i], out->linesize[i],
+                                    iright->data[i] + s->in_off_left[i],
+                                    iright->linesize[i] * s->in.row_step,
+                                    s->linesize[i], s->pheight[i]);
+            }
+            break;
         }
         break;
     case ANAGLYPH_RB_GRAY:
@@ -701,11 +926,25 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
     case ANAGLYPH_YB_HALF:
     case ANAGLYPH_YB_COLOR:
     case ANAGLYPH_YB_DUBOIS: {
-        ThreadData td;
+        if (s->in.format == INTERLEAVE_COLS_LR ||
+            s->in.format == INTERLEAVE_COLS_RL) {
+            const int d = (s->in.format & 1);
 
-        td.ileft = ileft; td.iright = iright; td.out = out;
-        ctx->internal->execute(ctx, filter_slice, &td, NULL,
-                               FFMIN(s->out.height, ctx->graph->nb_threads));
+            anaglyph_ic(out->data[0],
+                ileft ->data[0] + s->in_off_left [0] +   d  * 3,
+                iright->data[0] + s->in_off_right[0] + (!d) * 3,
+                out->linesize[0],
+                ileft->linesize[0] * s->in.row_step,
+                iright->linesize[0] * s->in.row_step,
+                s->out.width, s->out.height,
+                s->ana_matrix[0], s->ana_matrix[1], s->ana_matrix[2]);
+        } else {
+            ThreadData td;
+
+            td.ileft = ileft; td.iright = iright; td.out = out;
+            ff_filter_execute(ctx, filter_slice, &td, NULL,
+                              FFMIN(s->out.height, ff_filter_get_nb_threads(ctx)));
+        }
         break;
     }
     case CHECKERBOARD_RL:
@@ -715,47 +954,50 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 
             for (y = 0; y < s->pheight[i]; y++) {
                 uint8_t *dst = out->data[i] + out->linesize[i] * y;
-                uint8_t *left = ileft->data[i] + ileft->linesize[i] * y + s->in_off_left[i];
-                uint8_t *right = iright->data[i] + iright->linesize[i] * y + s->in_off_right[i];
+                const int d1 = (s->in.format == INTERLEAVE_COLS_LR || s->in.format == INTERLEAVE_COLS_RL) && (s->in.format & 1) != (s->out.format & 1);
+                const int d2 = (s->in.format == INTERLEAVE_COLS_LR || s->in.format == INTERLEAVE_COLS_RL) ? !d1 : 0;
+                const int m = 1 + (s->in.format == INTERLEAVE_COLS_LR || s->in.format == INTERLEAVE_COLS_RL);
+                uint8_t *left  = ileft->data[i]  + ileft->linesize[i]  * y + s->in_off_left[i]  + d1 * s->pixstep[i];
+                uint8_t *right = iright->data[i] + iright->linesize[i] * y + s->in_off_right[i] + d2 * s->pixstep[i];
                 int p, b;
 
-                if (s->out.format == CHECKERBOARD_RL)
+                if (s->out.format == CHECKERBOARD_RL && s->in.format != INTERLEAVE_COLS_LR && s->in.format != INTERLEAVE_COLS_RL)
                     FFSWAP(uint8_t*, left, right);
                 switch (s->pixstep[i]) {
                 case 1:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=2, p++, b++) {
-                        dst[x  ] = (b&1) == (y&1) ? left[p] : right[p];
-                        dst[x+1] = (b&1) != (y&1) ? left[p] : right[p];
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=2, p++, b+=2) {
+                        dst[x  ] = (b&1) == (y&1) ? left[p*m] : right[p*m];
+                        dst[x+1] = (b&1) != (y&1) ? left[p*m] : right[p*m];
                     }
                     break;
                 case 2:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=4, p+=2, b++) {
-                        AV_WN16(&dst[x  ], (b&1) == (y&1) ? AV_RN16(&left[p]) : AV_RN16(&right[p]));
-                        AV_WN16(&dst[x+2], (b&1) != (y&1) ? AV_RN16(&left[p]) : AV_RN16(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=4, p+=2, b+=2) {
+                        AV_WN16(&dst[x  ], (b&1) == (y&1) ? AV_RN16(&left[p*m]) : AV_RN16(&right[p*m]));
+                        AV_WN16(&dst[x+2], (b&1) != (y&1) ? AV_RN16(&left[p*m]) : AV_RN16(&right[p*m]));
                     }
                     break;
                 case 3:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=6, p+=3, b++) {
-                        AV_WB24(&dst[x  ], (b&1) == (y&1) ? AV_RB24(&left[p]) : AV_RB24(&right[p]));
-                        AV_WB24(&dst[x+3], (b&1) != (y&1) ? AV_RB24(&left[p]) : AV_RB24(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=6, p+=3, b+=2) {
+                        AV_WB24(&dst[x  ], (b&1) == (y&1) ? AV_RB24(&left[p*m]) : AV_RB24(&right[p*m]));
+                        AV_WB24(&dst[x+3], (b&1) != (y&1) ? AV_RB24(&left[p*m]) : AV_RB24(&right[p*m]));
                     }
                     break;
                 case 4:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=8, p+=4, b++) {
-                        AV_WN32(&dst[x  ], (b&1) == (y&1) ? AV_RN32(&left[p]) : AV_RN32(&right[p]));
-                        AV_WN32(&dst[x+4], (b&1) != (y&1) ? AV_RN32(&left[p]) : AV_RN32(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=8, p+=4, b+=2) {
+                        AV_WN32(&dst[x  ], (b&1) == (y&1) ? AV_RN32(&left[p*m]) : AV_RN32(&right[p*m]));
+                        AV_WN32(&dst[x+4], (b&1) != (y&1) ? AV_RN32(&left[p*m]) : AV_RN32(&right[p*m]));
                     }
                     break;
                 case 6:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=12, p+=6, b++) {
-                        AV_WB48(&dst[x  ], (b&1) == (y&1) ? AV_RB48(&left[p]) : AV_RB48(&right[p]));
-                        AV_WB48(&dst[x+6], (b&1) != (y&1) ? AV_RB48(&left[p]) : AV_RB48(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=12, p+=6, b+=2) {
+                        AV_WB48(&dst[x  ], (b&1) == (y&1) ? AV_RB48(&left[p*m]) : AV_RB48(&right[p*m]));
+                        AV_WB48(&dst[x+6], (b&1) != (y&1) ? AV_RB48(&left[p*m]) : AV_RB48(&right[p*m]));
                     }
                     break;
                 case 8:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=16, p+=8, b++) {
-                        AV_WN64(&dst[x  ], (b&1) == (y&1) ? AV_RN64(&left[p]) : AV_RN64(&right[p]));
-                        AV_WN64(&dst[x+8], (b&1) != (y&1) ? AV_RN64(&left[p]) : AV_RN64(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=16, p+=8, b+=2) {
+                        AV_WN64(&dst[x  ], (b&1) == (y&1) ? AV_RN64(&left[p*m]) : AV_RN64(&right[p*m]));
+                        AV_WN64(&dst[x+8], (b&1) != (y&1) ? AV_RN64(&left[p*m]) : AV_RN64(&right[p*m]));
                     }
                     break;
                 }
@@ -765,11 +1007,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
     case INTERLEAVE_COLS_LR:
     case INTERLEAVE_COLS_RL:
         for (i = 0; i < s->nb_planes; i++) {
+            const int d = (s->in.format == INTERLEAVE_COLS_LR || s->in.format == INTERLEAVE_COLS_RL);
+            const int m = 1 + d;
             int x, y;
 
             for (y = 0; y < s->pheight[i]; y++) {
                 uint8_t *dst = out->data[i] + out->linesize[i] * y;
-                uint8_t *left = ileft->data[i] + ileft->linesize[i] * y * s->in.row_step + s->in_off_left[i];
+                uint8_t *left = ileft->data[i] + ileft->linesize[i] * y * s->in.row_step + s->in_off_left[i] + d * s->pixstep[i];
                 uint8_t *right = iright->data[i] + iright->linesize[i] * y * s->in.row_step + s->in_off_right[i];
                 int p, b;
 
@@ -778,39 +1022,39 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 
                 switch (s->pixstep[i]) {
                 case 1:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=2, p++, b++) {
-                        dst[x  ] =   b&1  ? left[p] : right[p];
-                        dst[x+1] = !(b&1) ? left[p] : right[p];
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=2, p++, b+=2) {
+                        dst[x  ] =   b&1  ? left[p*m] : right[p*m];
+                        dst[x+1] = !(b&1) ? left[p*m] : right[p*m];
                     }
                     break;
                 case 2:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=4, p+=2, b++) {
-                        AV_WN16(&dst[x  ],   b&1  ? AV_RN16(&left[p]) : AV_RN16(&right[p]));
-                        AV_WN16(&dst[x+2], !(b&1) ? AV_RN16(&left[p]) : AV_RN16(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=4, p+=2, b+=2) {
+                        AV_WN16(&dst[x  ],   b&1  ? AV_RN16(&left[p*m]) : AV_RN16(&right[p*m]));
+                        AV_WN16(&dst[x+2], !(b&1) ? AV_RN16(&left[p*m]) : AV_RN16(&right[p*m]));
                     }
                     break;
                 case 3:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=6, p+=3, b++) {
-                        AV_WB24(&dst[x  ],   b&1  ? AV_RB24(&left[p]) : AV_RB24(&right[p]));
-                        AV_WB24(&dst[x+3], !(b&1) ? AV_RB24(&left[p]) : AV_RB24(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=6, p+=3, b+=2) {
+                        AV_WB24(&dst[x  ],   b&1  ? AV_RB24(&left[p*m]) : AV_RB24(&right[p*m]));
+                        AV_WB24(&dst[x+3], !(b&1) ? AV_RB24(&left[p*m]) : AV_RB24(&right[p*m]));
                     }
                     break;
                 case 4:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=8, p+=4, b++) {
-                        AV_WN32(&dst[x  ],   b&1  ? AV_RN32(&left[p]) : AV_RN32(&right[p]));
-                        AV_WN32(&dst[x+4], !(b&1) ? AV_RN32(&left[p]) : AV_RN32(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=8, p+=4, b+=2) {
+                        AV_WN32(&dst[x  ],   b&1  ? AV_RN32(&left[p*m]) : AV_RN32(&right[p*m]));
+                        AV_WN32(&dst[x+4], !(b&1) ? AV_RN32(&left[p*m]) : AV_RN32(&right[p*m]));
                     }
                     break;
                 case 6:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=12, p+=6, b++) {
-                        AV_WB48(&dst[x  ],   b&1  ? AV_RB48(&left[p]) : AV_RB48(&right[p]));
-                        AV_WB48(&dst[x+6], !(b&1) ? AV_RB48(&left[p]) : AV_RB48(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=12, p+=6, b+=2) {
+                        AV_WB48(&dst[x  ],   b&1  ? AV_RB48(&left[p*m]) : AV_RB48(&right[p*m]));
+                        AV_WB48(&dst[x+6], !(b&1) ? AV_RB48(&left[p*m]) : AV_RB48(&right[p*m]));
                     }
                     break;
                 case 8:
-                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=16, p+=8, b++) {
-                        AV_WN64(&dst[x  ],   b&1 ?  AV_RN64(&left[p]) : AV_RN64(&right[p]));
-                        AV_WN64(&dst[x+8], !(b&1) ? AV_RN64(&left[p]) : AV_RN64(&right[p]));
+                    for (x = 0, b = 0, p = 0; x < s->linesize[i] * 2; x+=16, p+=8, b+=2) {
+                        AV_WN64(&dst[x  ],   b&1 ?  AV_RN64(&left[p*m]) : AV_RN64(&right[p*m]));
+                        AV_WN64(&dst[x+8], !(b&1) ? AV_RN64(&left[p*m]) : AV_RN64(&right[p*m]));
                     }
                     break;
                 }
@@ -821,19 +1065,26 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
         av_assert0(0);
     }
 
-    av_frame_free(&inpicref);
-    av_frame_free(&s->prev);
     if (oright != oleft) {
         if (s->out.format == ALTERNATING_LR)
             FFSWAP(AVFrame *, oleft, oright);
-        oright->pts = outlink->frame_count * s->ts_unit;
+        oright->pts = s->prev->pts * 2;
         ff_filter_frame(outlink, oright);
         out = oleft;
-        oleft->pts = outlink->frame_count * s->ts_unit;
+        oleft->pts = s->prev->pts + inpicref->pts;
+        av_frame_free(&s->prev);
+        s->prev = inpicref;
     } else if (s->in.format == ALTERNATING_LR ||
                s->in.format == ALTERNATING_RL) {
-        out->pts = outlink->frame_count * s->ts_unit;
+        out->pts = s->prev->pts / 2;
+        av_frame_free(&s->prev);
+        av_frame_free(&inpicref);
+    } else {
+        av_frame_free(&s->prev);
+        av_frame_free(&inpicref);
     }
+    av_assert0(out);
+    out->sample_aspect_ratio = s->aspect;
     return ff_filter_frame(outlink, out);
 }
 
@@ -850,7 +1101,6 @@ static const AVFilterPad stereo3d_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad stereo3d_outputs[] = {
@@ -859,17 +1109,16 @@ static const AVFilterPad stereo3d_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_stereo3d = {
-    .name          = "stereo3d",
-    .description   = NULL_IF_CONFIG_SMALL("Convert video stereoscopic 3D view."),
+const FFFilter ff_vf_stereo3d = {
+    .p.name        = "stereo3d",
+    .p.description = NULL_IF_CONFIG_SMALL("Convert video stereoscopic 3D view."),
+    .p.priv_class  = &stereo3d_class,
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(Stereo3DContext),
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = stereo3d_inputs,
-    .outputs       = stereo3d_outputs,
-    .priv_class    = &stereo3d_class,
-    .flags         = AVFILTER_FLAG_SLICE_THREADS,
+    FILTER_INPUTS(stereo3d_inputs),
+    FILTER_OUTPUTS(stereo3d_outputs),
+    FILTER_QUERY_FUNC2(query_formats),
 };

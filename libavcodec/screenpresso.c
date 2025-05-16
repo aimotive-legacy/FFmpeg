@@ -30,23 +30,24 @@
  * rebuilt frame (not the reference), and since there is no coordinate system
  * they contain exactly as many pixel as the keyframe.
  *
- * Supports: BGR24
+ * Supports: BGR0, BGR24, RGB555
  */
 
 #include <stdint.h>
-#include <string.h>
 #include <zlib.h>
 
 #include "libavutil/imgutils.h"
 #include "libavutil/internal.h"
+#include "libavutil/mem.h"
 
 #include "avcodec.h"
-#include "internal.h"
+#include "codec_internal.h"
+#include "decode.h"
 
 typedef struct ScreenpressoContext {
     AVFrame *current;
 
-    /* zlib interation */
+    /* zlib interaction */
     uint8_t *inflated_buf;
     uLongf inflated_size;
 } ScreenpressoContext;
@@ -78,10 +79,8 @@ static av_cold int screenpresso_init(AVCodecContext *avctx)
     if (!ctx->current)
         return AVERROR(ENOMEM);
 
-    avctx->pix_fmt = AV_PIX_FMT_BGR24;
-
-    /* Allocate maximum size possible, a full frame */
-    ctx->inflated_size = avctx->width * avctx->height * 3;
+    /* Allocate maximum size possible, a full RGBA frame */
+    ctx->inflated_size = avctx->width * avctx->height * 4;
     ctx->inflated_buf  = av_malloc(ctx->inflated_size);
     if (!ctx->inflated_buf)
         return AVERROR(ENOMEM);
@@ -95,19 +94,19 @@ static void sum_delta_flipped(uint8_t       *dst, int dst_linesize,
 {
     int i;
     for (; height > 0; height--) {
+        const uint8_t *src1 = &src[(height - 1) * src_linesize];
         for (i = 0; i < bytewidth; i++)
-            dst[i] += src[(height - 1) * src_linesize + i];
+            dst[i] += src1[i];
         dst += dst_linesize;
     }
 }
 
-static int screenpresso_decode_frame(AVCodecContext *avctx, void *data,
+static int screenpresso_decode_frame(AVCodecContext *avctx, AVFrame *frame,
                                      int *got_frame, AVPacket *avpkt)
 {
     ScreenpressoContext *ctx = avctx->priv_data;
-    AVFrame *frame = data;
     uLongf length = ctx->inflated_size;
-    int keyframe;
+    int keyframe, component_size, src_linesize;
     int ret;
 
     /* Size check */
@@ -116,13 +115,27 @@ static int screenpresso_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
     }
 
-    /* Basic sanity check, but not really harmful */
-    if ((avpkt->data[0] != 0x73 && avpkt->data[0] != 0x72) ||
-        avpkt->data[1] != 8) { // bpp probably
-        av_log(avctx, AV_LOG_WARNING, "Unknown header 0x%02X%02X\n",
-               avpkt->data[0], avpkt->data[1]);
+    /* Compression level (4 bits) and keyframe information (1 bit) */
+    av_log(avctx, AV_LOG_DEBUG, "Compression level %d\n", avpkt->data[0] >> 4);
+    keyframe = avpkt->data[0] & 1;
+
+    /* Pixel size */
+    component_size = ((avpkt->data[1] >> 2) & 0x03) + 1;
+    switch (component_size) {
+    case 2:
+        avctx->pix_fmt = AV_PIX_FMT_RGB555LE;
+        break;
+    case 3:
+        avctx->pix_fmt = AV_PIX_FMT_BGR24;
+        break;
+    case 4:
+        avctx->pix_fmt = AV_PIX_FMT_BGR0;
+        break;
+    default:
+        av_log(avctx, AV_LOG_ERROR, "Invalid bits per pixel value (%d)\n",
+               component_size);
+        return AVERROR_INVALIDDATA;
     }
-    keyframe = (avpkt->data[0] == 0x73);
 
     /* Inflate the frame after the 2 byte header */
     ret = uncompress(ctx->inflated_buf, &length,
@@ -132,22 +145,25 @@ static int screenpresso_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_UNKNOWN;
     }
 
-    ret = ff_reget_buffer(avctx, ctx->current);
+    ret = ff_reget_buffer(avctx, ctx->current, 0);
     if (ret < 0)
         return ret;
+
+    /* Codec has aligned strides */
+    src_linesize = FFALIGN(avctx->width * component_size, 4);
 
     /* When a keyframe is found, copy it (flipped) */
     if (keyframe)
         av_image_copy_plane(ctx->current->data[0] +
                             ctx->current->linesize[0] * (avctx->height - 1),
                             -1 * ctx->current->linesize[0],
-                            ctx->inflated_buf, avctx->width * 3,
-                            avctx->width * 3, avctx->height);
+                            ctx->inflated_buf, src_linesize,
+                            avctx->width * component_size, avctx->height);
     /* Otherwise sum the delta on top of the current frame */
     else
         sum_delta_flipped(ctx->current->data[0], ctx->current->linesize[0],
-                          ctx->inflated_buf, avctx->width * 3,
-                          avctx->width * 3, avctx->height);
+                          ctx->inflated_buf, src_linesize,
+                          avctx->width * component_size, avctx->height);
 
     /* Frame is ready to be output */
     ret = av_frame_ref(frame, ctx->current);
@@ -157,25 +173,24 @@ static int screenpresso_decode_frame(AVCodecContext *avctx, void *data,
     /* Usual properties */
     if (keyframe) {
         frame->pict_type = AV_PICTURE_TYPE_I;
-        frame->key_frame = 1;
+        frame->flags |= AV_FRAME_FLAG_KEY;
     } else {
         frame->pict_type = AV_PICTURE_TYPE_P;
     }
     *got_frame = 1;
 
-    return 0;
+    return avpkt->size;
 }
 
-AVCodec ff_screenpresso_decoder = {
-    .name           = "screenpresso",
-    .long_name      = NULL_IF_CONFIG_SMALL("Screenpresso"),
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_SCREENPRESSO,
+const FFCodec ff_screenpresso_decoder = {
+    .p.name         = "screenpresso",
+    CODEC_LONG_NAME("Screenpresso"),
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_SCREENPRESSO,
     .init           = screenpresso_init,
-    .decode         = screenpresso_decode_frame,
+    FF_CODEC_DECODE_CB(screenpresso_decode_frame),
     .close          = screenpresso_close,
     .priv_data_size = sizeof(ScreenpressoContext),
-    .capabilities   = AV_CODEC_CAP_DR1,
-    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE |
-                      FF_CODEC_CAP_INIT_CLEANUP,
+    .p.capabilities = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

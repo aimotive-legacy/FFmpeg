@@ -18,10 +18,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef MPEGVIDEO_MIPS_H
-#define MPEGVIDEO_MIPS_H
+#ifndef AVCODEC_MIPS_MPEGVIDEO_MIPS_H
+#define AVCODEC_MIPS_MPEGVIDEO_MIPS_H
 
 #include "libavcodec/mpegvideo.h"
+#include "libavcodec/mpegvideoenc.h"
 
 void ff_dct_unquantize_h263_intra_mmi(MpegEncContext *s, int16_t *block,
         int n, int qscale);
@@ -33,6 +34,6 @@ void ff_dct_unquantize_mpeg1_inter_mmi(MpegEncContext *s, int16_t *block,
         int n, int qscale);
 void ff_dct_unquantize_mpeg2_intra_mmi(MpegEncContext *s, int16_t *block,
         int n, int qscale);
-void ff_denoise_dct_mmi(MpegEncContext *s, int16_t *block);
+void ff_denoise_dct_mmi(MPVEncContext *s, int16_t *block);
 
-#endif /* MPEGVIDEO_MIPS_H */
+#endif /* AVCODEC_MIPS_MPEGVIDEO_MIPS_H */

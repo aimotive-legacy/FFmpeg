@@ -23,15 +23,16 @@
  * Shape Adaptive Blur filter, ported from MPlayer libmpcodecs/vf_sab.c
  */
 
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libswscale/swscale.h"
 
 #include "avfilter.h"
-#include "formats.h"
-#include "internal.h"
+#include "filters.h"
+#include "video.h"
 
-typedef struct {
+typedef struct FilterParam {
     float radius;
     float pre_filter_radius;
     float strength;
@@ -46,7 +47,7 @@ typedef struct {
     int color_diff_coeff[COLOR_DIFF_COEFF_SIZE];
 } FilterParam;
 
-typedef struct {
+typedef struct SabContext {
     const AVClass *class;
     FilterParam  luma;
     FilterParam  chroma;
@@ -55,21 +56,14 @@ typedef struct {
     unsigned int sws_flags;
 } SabContext;
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_YUV410P,
-        AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_NONE
-    };
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_YUV410P,
+    AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_NONE
+};
 
 #define RADIUS_MIN 0.1
 #define RADIUS_MAX 4.0
@@ -214,8 +208,8 @@ static int config_props(AVFilterLink *inlink)
 
     close_filter_param(&s->chroma);
     ret = open_filter_param(&s->chroma,
-                            FF_CEIL_RSHIFT(inlink->w, s->hsub),
-                            FF_CEIL_RSHIFT(inlink->h, s->vsub), s->sws_flags);
+                            AV_CEIL_RSHIFT(inlink->w, s->hsub),
+                            AV_CEIL_RSHIFT(inlink->h, s->vsub), s->sws_flags);
     return ret;
 }
 
@@ -295,8 +289,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpic)
     blur(outpic->data[0], outpic->linesize[0], inpic->data[0],  inpic->linesize[0],
          inlink->w, inlink->h, &s->luma);
     if (inpic->data[2]) {
-        int cw = FF_CEIL_RSHIFT(inlink->w, s->hsub);
-        int ch = FF_CEIL_RSHIFT(inlink->h, s->vsub);
+        int cw = AV_CEIL_RSHIFT(inlink->w, s->hsub);
+        int ch = AV_CEIL_RSHIFT(inlink->h, s->vsub);
         blur(outpic->data[1], outpic->linesize[1], inpic->data[1], inpic->linesize[1], cw, ch, &s->chroma);
         blur(outpic->data[2], outpic->linesize[2], inpic->data[2], inpic->linesize[2], cw, ch, &s->chroma);
     }
@@ -312,26 +306,17 @@ static const AVFilterPad sab_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_props,
     },
-    { NULL }
 };
 
-static const AVFilterPad sab_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_sab = {
-    .name          = "sab",
-    .description   = NULL_IF_CONFIG_SMALL("Apply shape adaptive blur."),
+const FFFilter ff_vf_sab = {
+    .p.name        = "sab",
+    .p.description = NULL_IF_CONFIG_SMALL("Apply shape adaptive blur."),
+    .p.priv_class  = &sab_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
     .priv_size     = sizeof(SabContext),
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = sab_inputs,
-    .outputs       = sab_outputs,
-    .priv_class    = &sab_class,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    FILTER_INPUTS(sab_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
 };

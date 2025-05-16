@@ -20,6 +20,7 @@
 
 #include "libavcodec/bytestream.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 #define HEADER_SIZE         24
@@ -36,7 +37,7 @@
  *  uint32_t    ts;     // time
  */
 
-static int msnwc_tcp_probe(AVProbeData *p)
+static int msnwc_tcp_probe(const AVProbeData *p)
 {
     int i;
 
@@ -74,17 +75,17 @@ static int msnwc_tcp_probe(AVProbeData *p)
 static int msnwc_tcp_read_header(AVFormatContext *ctx)
 {
     AVIOContext *pb = ctx->pb;
-    AVCodecContext *codec;
+    AVCodecParameters *par;
     AVStream *st;
 
     st = avformat_new_stream(ctx, NULL);
     if (!st)
         return AVERROR(ENOMEM);
 
-    codec             = st->codec;
-    codec->codec_type = AVMEDIA_TYPE_VIDEO;
-    codec->codec_id   = AV_CODEC_ID_MIMIC;
-    codec->codec_tag  = MKTAG('M', 'L', '2', '0');
+    par             = st->codecpar;
+    par->codec_type = AVMEDIA_TYPE_VIDEO;
+    par->codec_id   = AV_CODEC_ID_MIMIC;
+    par->codec_tag  = MKTAG('M', 'L', '2', '0');
 
     avpriv_set_pts_info(st, 32, 1, 1000);
 
@@ -136,9 +137,9 @@ static int msnwc_tcp_read_packet(AVFormatContext *ctx, AVPacket *pkt)
     return HEADER_SIZE + size;
 }
 
-AVInputFormat ff_msnwc_tcp_demuxer = {
-    .name        = "msnwctcp",
-    .long_name   = NULL_IF_CONFIG_SMALL("MSN TCP Webcam stream"),
+const FFInputFormat ff_msnwc_tcp_demuxer = {
+    .p.name      = "msnwctcp",
+    .p.long_name = NULL_IF_CONFIG_SMALL("MSN TCP Webcam stream"),
     .read_probe  = msnwc_tcp_probe,
     .read_header = msnwc_tcp_read_header,
     .read_packet = msnwc_tcp_read_packet,

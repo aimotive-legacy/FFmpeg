@@ -19,6 +19,7 @@
  */
 
 #include "libavutil/avassert.h"
+#include "libavutil/mem.h"
 #include "swresample_internal.h"
 
 #include "noise_shaping_data.c"
@@ -102,6 +103,11 @@ av_cold int swri_dither_init(SwrContext *s, enum AVSampleFormat out_fmt, enum AV
     if (out_fmt == AV_SAMPLE_FMT_S32 && s->dither.output_sample_bits)
         scale *= 1<<(32-s->dither.output_sample_bits);
 
+    if (scale == 0) {
+        s->dither.method = 0;
+        return 0;
+    }
+
     s->dither.ns_pos = 0;
     s->dither.noise_scale=   scale;
     s->dither.ns_scale   =   scale;
@@ -121,15 +127,6 @@ av_cold int swri_dither_init(SwrContext *s, enum AVSampleFormat out_fmt, enum AV
     if (!filters[i].coefs && s->dither.method > SWR_DITHER_NS) {
         av_log(s, AV_LOG_WARNING, "Requested noise shaping dither not available at this sampling rate, using triangular hp dither\n");
         s->dither.method = SWR_DITHER_TRIANGULAR_HIGHPASS;
-    }
-
-    av_assert0(!s->preout.count);
-    s->dither.noise = s->preout;
-    s->dither.temp  = s->preout;
-    if (s->dither.method > SWR_DITHER_NS) {
-        s->dither.noise.bps = 4;
-        s->dither.noise.fmt = AV_SAMPLE_FMT_FLTP;
-        s->dither.noise_scale = 1;
     }
 
     return 0;

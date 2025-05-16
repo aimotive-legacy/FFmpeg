@@ -29,23 +29,20 @@
 
 #include "libavutil/softfloat.h"
 
-#define FFT_FLOAT    0
-#define FFT_FIXED_32 1
-
 #define AAC_RENAME(x)       x ## _fixed
-#define AAC_RENAME_32(x)    x ## _fixed_32
-#define INTFLOAT int
-#define INT64FLOAT          int64_t
-#define SHORTFLOAT int16_t
-#define AAC_FLOAT SoftFloat
-#define AAC_SIGNE           int
+#define AAC_RENAME2(x)      x ## _fixed
+typedef int                 INTFLOAT;
+typedef unsigned            UINTFLOAT;  ///< Equivalent to INTFLOAT, Used as temporal cast to avoid undefined sign overflow operations.
+typedef int64_t             INT64FLOAT;
+typedef int16_t             SHORTFLOAT;
+typedef SoftFloat           AAC_FLOAT;
+typedef int                 AAC_SIGNE;
 #define FIXR(a)             ((int)((a) * 1 + 0.5))
 #define FIXR10(a)           ((int)((a) * 1024.0 + 0.5))
 #define Q23(a)              (int)((a) * 8388608.0 + 0.5)
 #define Q30(x)              (int)((x)*1073741824.0 + 0.5)
 #define Q31(x)              (int)((x)*2147483648.0 + 0.5)
-#define RANGE15(x)          x
-#define GET_GAIN(x, y)      (-(y) << (x)) + 1024
+#define GET_GAIN(x, y)      (-(y) * (1 << (x))) + 1024
 #define AAC_MUL16(x, y)     (int)(((int64_t)(x) * (y) + 0x8000) >> 16)
 #define AAC_MUL26(x, y)     (int)(((int64_t)(x) * (y) + 0x2000000) >> 26)
 #define AAC_MUL30(x, y)     (int)(((int64_t)(x) * (y) + 0x20000000) >> 30)
@@ -72,27 +69,46 @@
 #define AAC_MSUB31_V3(x, y, z)    (int)((((int64_t)(x) * (z)) - \
                                       ((int64_t)(y) * (z)) + \
                                         0x40000000) >> 31)
-#define AAC_HALF_SUM(x, y)  (x) >> 1 + (y) >> 1
-#define AAC_SRA_R(x, y)     (int)(((x) + (1 << ((y) - 1))) >> (y))
+#define AAC_HALF_SUM(x, y)  (((x) >> 1) + ((y) >> 1))
+
+/**
+ * Predictor State
+ */
+typedef struct PredictorStateFixed {
+    SoftFloat cor0;
+    SoftFloat cor1;
+    SoftFloat var0;
+    SoftFloat var1;
+    SoftFloat r0;
+    SoftFloat r1;
+    SoftFloat k1;
+    SoftFloat x_est;
+} PredictorState;
+
+#ifdef LPC_USE_FIXED
+#error aac_defines.h must be included before lpc_functions.h for fixed point decoder
+#endif
+
+#define LPC_USE_FIXED 1
+#define LPC_MUL26(x, y)     AAC_MUL26((x), (y))
+#define LPC_FIXR(x)         FIXR(x)
+#define LPC_SRA_R(x, y)     (int)(((x) + (1 << ((y) - 1))) >> (y))
 
 #else
 
-#define FFT_FLOAT    1
-#define FFT_FIXED_32 0
-
 #define AAC_RENAME(x)       x
-#define AAC_RENAME_32(x)    x
-#define INTFLOAT float
-#define INT64FLOAT          float
-#define SHORTFLOAT float
-#define AAC_FLOAT float
-#define AAC_SIGNE           unsigned
+#define AAC_RENAME2(x)      ff_ ## x
+typedef float               INTFLOAT;
+typedef float               UINTFLOAT;
+typedef float               INT64FLOAT;
+typedef float               SHORTFLOAT;
+typedef float               AAC_FLOAT;
+typedef unsigned            AAC_SIGNE;
 #define FIXR(x)             ((float)(x))
 #define FIXR10(x)           ((float)(x))
-#define Q23(x)              x
-#define Q30(x)              x
-#define Q31(x)              x
-#define RANGE15(x)          (32768.0 * (x))
+#define Q23(x)              ((float)(x))
+#define Q30(x)              ((float)(x))
+#define Q31(x)              ((float)(x))
 #define GET_GAIN(x, y)      powf((x), -(y))
 #define AAC_MUL16(x, y)     ((x) * (y))
 #define AAC_MUL26(x, y)     ((x) * (y))
@@ -107,7 +123,20 @@
                                                (c) * (d) - (e) * (f))
 #define AAC_MSUB31_V3(x, y, z)    ((x) - (y)) * (z)
 #define AAC_HALF_SUM(x, y)  ((x) + (y)) * 0.5f
-#define AAC_SRA_R(x, y)     (x)
+
+/**
+ * Predictor State
+ */
+typedef struct PredictorState {
+    float cor0;
+    float cor1;
+    float var0;
+    float var1;
+    float r0;
+    float r1;
+    float k1;
+    float x_est;
+} PredictorState;
 
 #endif /* USE_FIXED */
 

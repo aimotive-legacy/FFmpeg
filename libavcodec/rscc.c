@@ -31,7 +31,7 @@
  * and it can be deflated or not. Similarly, pixel data comes after the header
  * and a variable size value, and it can be deflated or just raw.
  *
- * Supports: BGRA
+ * Supports: PAL8, BGRA, BGR24, RGB555
  */
 
 #include <stdint.h>
@@ -40,10 +40,12 @@
 
 #include "libavutil/imgutils.h"
 #include "libavutil/internal.h"
+#include "libavutil/mem.h"
 
 #include "avcodec.h"
 #include "bytestream.h"
-#include "internal.h"
+#include "codec_internal.h"
+#include "decode.h"
 
 #define TILE_SIZE 8
 
@@ -57,10 +59,14 @@ typedef struct RsccContext {
     AVFrame *reference;
     Tile *tiles;
     unsigned int tiles_size;
+    int component_size;
+
+    uint8_t palette[AVPALETTE_SIZE];
 
     /* zlib interaction */
     uint8_t *inflated_buf;
     uLongf inflated_size;
+    int valid_pixels;
 } RsccContext;
 
 static av_cold int rscc_init(AVCodecContext *avctx)
@@ -80,10 +86,48 @@ static av_cold int rscc_init(AVCodecContext *avctx)
     if (!ctx->reference)
         return AVERROR(ENOMEM);
 
-    avctx->pix_fmt = AV_PIX_FMT_BGRA;
+    /* Get pixel format and the size of the pixel */
+    if (avctx->codec_tag == MKTAG('I', 'S', 'C', 'C')) {
+        if (avctx->extradata && avctx->extradata_size == 4) {
+            if ((avctx->extradata[0] >> 1) & 1) {
+                avctx->pix_fmt = AV_PIX_FMT_BGRA;
+                ctx->component_size = 4;
+            } else {
+                avctx->pix_fmt = AV_PIX_FMT_BGR24;
+                ctx->component_size = 3;
+            }
+        } else {
+            avctx->pix_fmt = AV_PIX_FMT_BGRA;
+            ctx->component_size = 4;
+        }
+    } else if (avctx->codec_tag == MKTAG('R', 'S', 'C', 'C')) {
+        ctx->component_size = avctx->bits_per_coded_sample / 8;
+        switch (avctx->bits_per_coded_sample) {
+        case 8:
+            avctx->pix_fmt = AV_PIX_FMT_PAL8;
+            break;
+        case 16:
+            avctx->pix_fmt = AV_PIX_FMT_RGB555LE;
+            break;
+        case 24:
+            avctx->pix_fmt = AV_PIX_FMT_BGR24;
+            break;
+        case 32:
+            avctx->pix_fmt = AV_PIX_FMT_BGR0;
+            break;
+        default:
+            av_log(avctx, AV_LOG_ERROR, "Invalid bits per pixel value (%d)\n",
+                   avctx->bits_per_coded_sample);
+            return AVERROR_INVALIDDATA;
+        }
+    } else {
+        avctx->pix_fmt = AV_PIX_FMT_BGR0;
+        ctx->component_size = 4;
+        av_log(avctx, AV_LOG_WARNING, "Invalid codec tag\n");
+    }
 
     /* Store the value to check for keyframes */
-    ctx->inflated_size = avctx->width * avctx->height * 4;
+    ctx->inflated_size = avctx->width * avctx->height * ctx->component_size;
 
     /* Allocate maximum size possible, a full frame */
     ctx->inflated_buf = av_malloc(ctx->inflated_size);
@@ -104,13 +148,12 @@ static av_cold int rscc_close(AVCodecContext *avctx)
     return 0;
 }
 
-static int rscc_decode_frame(AVCodecContext *avctx, void *data,
-                                     int *got_frame, AVPacket *avpkt)
+static int rscc_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                             int *got_frame, AVPacket *avpkt)
 {
     RsccContext *ctx = avctx->priv_data;
     GetByteContext *gbc = &ctx->gbc;
     GetByteContext tiles_gbc;
-    AVFrame *frame = data;
     const uint8_t *pixels, *raw;
     uint8_t *inflated_tiles = NULL;
     int tiles_nb, packed_size, pixel_size = 0;
@@ -126,6 +169,12 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
 
     /* Read number of tiles, and allocate the array */
     tiles_nb = bytestream2_get_le16(gbc);
+
+    if (tiles_nb == 0) {
+        av_log(avctx, AV_LOG_DEBUG, "no tiles\n");
+        return avpkt->size;
+    }
+
     av_fast_malloc(&ctx->tiles, &ctx->tiles_size,
                    tiles_nb * sizeof(*ctx->tiles));
     if (!ctx->tiles) {
@@ -151,6 +200,12 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
         /* If necessary, uncompress tiles, and hijack the bytestream reader */
         if (packed_tiles_size != tiles_nb * TILE_SIZE) {
             uLongf length = tiles_nb * TILE_SIZE;
+
+            if (bytestream2_get_bytes_left(gbc) < packed_tiles_size) {
+                ret = AVERROR_INVALIDDATA;
+                goto end;
+            }
+
             inflated_tiles = av_malloc(length);
             if (!inflated_tiles) {
                 ret = AVERROR(ENOMEM);
@@ -180,7 +235,13 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
         ctx->tiles[i].y = bytestream2_get_le16(gbc);
         ctx->tiles[i].h = bytestream2_get_le16(gbc);
 
-        pixel_size += ctx->tiles[i].w * ctx->tiles[i].h * 4;
+        if (pixel_size + ctx->tiles[i].w * (int64_t)ctx->tiles[i].h * ctx->component_size > INT_MAX) {
+            av_log(avctx, AV_LOG_ERROR, "Invalid tile dimensions\n");
+            ret = AVERROR_INVALIDDATA;
+            goto end;
+        }
+
+        pixel_size += ctx->tiles[i].w * ctx->tiles[i].h * ctx->component_size;
 
         ff_dlog(avctx, "tile %d orig(%d,%d) %dx%d.\n", i,
                 ctx->tiles[i].x, ctx->tiles[i].y,
@@ -219,11 +280,31 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
 
     ff_dlog(avctx, "pixel_size %d packed_size %d.\n", pixel_size, packed_size);
 
+    if (packed_size < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Invalid tile size %d\n", packed_size);
+        ret = AVERROR_INVALIDDATA;
+        goto end;
+    }
+
     /* Get pixels buffer, it may be deflated or just raw */
     if (pixel_size == packed_size) {
+        if (bytestream2_get_bytes_left(gbc) < pixel_size) {
+            av_log(avctx, AV_LOG_ERROR, "Insufficient input for %d\n", pixel_size);
+            ret = AVERROR_INVALIDDATA;
+            goto end;
+        }
         pixels = gbc->buffer;
     } else {
         uLongf len = ctx->inflated_size;
+        if (bytestream2_get_bytes_left(gbc) < packed_size) {
+            av_log(avctx, AV_LOG_ERROR, "Insufficient input for %d\n", packed_size);
+            ret = AVERROR_INVALIDDATA;
+            goto end;
+        }
+        if (ctx->inflated_size < pixel_size) {
+            ret = AVERROR_INVALIDDATA;
+            goto end;
+        }
         ret = uncompress(ctx->inflated_buf, &len, gbc->buffer, packed_size);
         if (ret) {
             av_log(avctx, AV_LOG_ERROR, "Pixel deflate error %d.\n", ret);
@@ -234,7 +315,7 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
     }
 
     /* Allocate when needed */
-    ret = ff_reget_buffer(avctx, ctx->reference);
+    ret = ff_reget_buffer(avctx, ctx->reference, 0);
     if (ret < 0)
         goto end;
 
@@ -243,11 +324,12 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
     for (i = 0; i < tiles_nb; i++) {
         uint8_t *dst = ctx->reference->data[0] + ctx->reference->linesize[0] *
                        (avctx->height - ctx->tiles[i].y - 1) +
-                       ctx->tiles[i].x * 4;
+                       ctx->tiles[i].x * ctx->component_size;
         av_image_copy_plane(dst, -1 * ctx->reference->linesize[0],
-                            raw, ctx->tiles[i].w * 4,
-                            ctx->tiles[i].w * 4, ctx->tiles[i].h);
-        raw += ctx->tiles[i].w * 4 * ctx->tiles[i].h;
+                            raw, ctx->tiles[i].w * ctx->component_size,
+                            ctx->tiles[i].w * ctx->component_size,
+                            ctx->tiles[i].h);
+        raw += ctx->tiles[i].w * ctx->component_size * ctx->tiles[i].h;
     }
 
     /* Frame is ready to be output */
@@ -258,27 +340,37 @@ static int rscc_decode_frame(AVCodecContext *avctx, void *data,
     /* Keyframe when the number of pixels updated matches the whole surface */
     if (pixel_size == ctx->inflated_size) {
         frame->pict_type = AV_PICTURE_TYPE_I;
-        frame->key_frame = 1;
+        frame->flags |= AV_FRAME_FLAG_KEY;
     } else {
         frame->pict_type = AV_PICTURE_TYPE_P;
     }
-    *got_frame = 1;
 
+    /* Palette handling */
+    if (avctx->pix_fmt == AV_PIX_FMT_PAL8) {
+        ff_copy_palette(ctx->palette, avpkt, avctx);
+        memcpy(frame->data[1], ctx->palette, AVPALETTE_SIZE);
+    }
+    // We only return a picture when enough of it is undamaged, this avoids copying nearly broken frames around
+    if (ctx->valid_pixels < ctx->inflated_size)
+        ctx->valid_pixels += pixel_size;
+    if (ctx->valid_pixels >= ctx->inflated_size * (100 - avctx->discard_damaged_percentage) / 100)
+        *got_frame = 1;
+
+    ret = avpkt->size;
 end:
     av_free(inflated_tiles);
     return ret;
 }
 
-AVCodec ff_rscc_decoder = {
-    .name           = "rscc",
-    .long_name      = NULL_IF_CONFIG_SMALL("innoHeim/Rsupport Screen Capture Codec"),
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_RSCC,
+const FFCodec ff_rscc_decoder = {
+    .p.name         = "rscc",
+    CODEC_LONG_NAME("innoHeim/Rsupport Screen Capture Codec"),
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_RSCC,
     .init           = rscc_init,
-    .decode         = rscc_decode_frame,
+    FF_CODEC_DECODE_CB(rscc_decode_frame),
     .close          = rscc_close,
     .priv_data_size = sizeof(RsccContext),
-    .capabilities   = AV_CODEC_CAP_DR1,
-    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE |
-                      FF_CODEC_CAP_INIT_CLEANUP,
+    .p.capabilities = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

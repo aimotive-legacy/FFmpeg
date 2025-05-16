@@ -18,8 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef LIBAVFILTER_PSNR_H
-#define LIBAVFILTER_PSNR_H
+#ifndef AVFILTER_PSNR_H
+#define AVFILTER_PSNR_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -28,6 +28,7 @@ typedef struct PSNRDSPContext {
     uint64_t (*sse_line)(const uint8_t *buf, const uint8_t *ref, int w);
 } PSNRDSPContext;
 
+void ff_psnr_init(PSNRDSPContext *dsp, int bpp);
 void ff_psnr_init_x86(PSNRDSPContext *dsp, int bpp);
 
-#endif /* LIBAVFILTER_PSNR_H */
+#endif /* AVFILTER_PSNR_H */

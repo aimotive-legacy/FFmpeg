@@ -21,10 +21,11 @@
 #include "libavutil/avstring.h"
 #include "libavutil/common.h"
 #include "libavutil/internal.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 
 #include "avfilter.h"
-#include "internal.h"
+#include "filters.h"
 #include "video.h"
 
 typedef struct ShuffleFramesContext {
@@ -67,8 +68,8 @@ static av_cold int init(AVFilterContext *ctx)
             return AVERROR(EINVAL);
         }
 
-        if (s->map[n] < 0 || s->map[n] >= nb_items) {
-            av_log(ctx, AV_LOG_ERROR, "Index out of range.\n");
+        if (s->map[n] < -1 || s->map[n] >= nb_items) {
+            av_log(ctx, AV_LOG_ERROR, "Index %d out of range: [-1, %d].\n", s->map[n], nb_items - 1);
             av_free(mapping);
             return AVERROR(EINVAL);
         }
@@ -83,13 +84,12 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext    *ctx = inlink->dst;
     ShuffleFramesContext *s = ctx->priv;
-    int ret;
+    int ret = 0;
 
     if (s->in_frames < s->nb_frames) {
         s->frames[s->in_frames] = frame;
         s->pts[s->in_frames] = frame->pts;
         s->in_frames++;
-        ret = 0;
     }
 
     if (s->in_frames == s->nb_frames) {
@@ -99,11 +99,13 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             AVFrame *out;
 
             x = s->map[n];
-            out = av_frame_clone(s->frames[x]);
-            if (!out)
-                return AVERROR(ENOMEM);
-            out->pts = s->pts[n];
-            ret = ff_filter_frame(ctx->outputs[0], out);
+            if (x >= 0) {
+                out = av_frame_clone(s->frames[x]);
+                if (!out)
+                    return AVERROR(ENOMEM);
+                out->pts = s->pts[n];
+                ret = ff_filter_frame(ctx->outputs[0], out);
+            }
             s->in_frames--;
         }
 
@@ -117,6 +119,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 static av_cold void uninit(AVFilterContext *ctx)
 {
     ShuffleFramesContext *s = ctx->priv;
+
+    while (s->in_frames > 0) {
+        s->in_frames--;
+        av_frame_free(&s->frames[s->in_frames]);
+    }
 
     av_freep(&s->frames);
     av_freep(&s->map);
@@ -138,25 +145,16 @@ static const AVFilterPad shuffleframes_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
-    { NULL },
 };
 
-static const AVFilterPad shuffleframes_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL },
-};
-
-AVFilter ff_vf_shuffleframes = {
-    .name          = "shuffleframes",
-    .description   = NULL_IF_CONFIG_SMALL("Shuffle video frames"),
+const FFFilter ff_vf_shuffleframes = {
+    .p.name        = "shuffleframes",
+    .p.description = NULL_IF_CONFIG_SMALL("Shuffle video frames."),
+    .p.priv_class  = &shuffleframes_class,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
     .priv_size     = sizeof(ShuffleFramesContext),
-    .priv_class    = &shuffleframes_class,
     .init          = init,
     .uninit        = uninit,
-    .inputs        = shuffleframes_inputs,
-    .outputs       = shuffleframes_outputs,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
+    FILTER_INPUTS(shuffleframes_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
 };

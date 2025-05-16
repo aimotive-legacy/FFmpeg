@@ -18,7 +18,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "common.h"
+#ifndef AVUTIL_QSORT_H
+#define AVUTIL_QSORT_H
+
+#include "macros.h"
 
 
 /**
@@ -115,3 +118,5 @@
         FFSWAP(type*, p, tmp);\
     }\
 } while (0)
+
+#endif /* AVUTIL_QSORT_H */
